@@ -33,9 +33,17 @@ def read_code(arg: str) -> str:
     return arg
 
 
+def track_dir() -> Path:
+    """Папка с проектом REAPER этого трека: текущая, а у трека из мультитрека — reaper/ в ней."""
+    cwd = Path.cwd().resolve()
+    nested = cwd / "reaper"
+    has_project = lambda folder: folder.is_dir() and any(p.suffix.lower() == ".rpp" for p in folder.iterdir())  # noqa: E731
+    return nested if not has_project(cwd) and has_project(nested) else cwd
+
+
 def guard(args) -> Path | None:
     """Папка, в которой обязан лежать активный проект REAPER."""
-    return None if args.any_project else Path.cwd().resolve()
+    return None if args.any_project else track_dir()
 
 
 def show(value) -> None:
@@ -503,11 +511,18 @@ def cmd_import_als(args):
     return importer.run(args)
 
 
+def cmd_multitrack(args):
+    """Проект REAPER из папки с мультитреком: осмотр файлов, затем сборка по раскладке."""
+    from . import multitrack
+
+    return multitrack.run(args)
+
+
 def cmd_init(args):
     """Заводит в папке трека документацию для Claude и служебную папку."""
-    cwd = Path.cwd()
-    if not any(p.suffix.lower() == ".rpp" for p in cwd.iterdir()):
-        print("в этой папке нет проекта REAPER (.rpp)")
+    cwd, project = Path.cwd().resolve(), track_dir()
+    if not any(p.suffix.lower() == ".rpp" for p in project.iterdir()):
+        print("в этой папке нет проекта REAPER (.rpp) — ни здесь, ни в reaper/")
         return 1
     for src in sorted((paths.TEMPLATES / "track").rglob("*")):
         dst = cwd / src.relative_to(paths.TEMPLATES / "track")
@@ -519,7 +534,7 @@ def cmd_init(args):
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(src, dst)
             print(f"создан: {dst.relative_to(cwd)}")
-    (cwd / paths.TRACK_DATA).mkdir(exist_ok=True)
+    (project / paths.TRACK_DATA).mkdir(exist_ok=True)
 
 
 def scan_plugins() -> str:
@@ -733,6 +748,12 @@ def main(argv=None) -> int:
     p.add_argument("action", choices=["scan", "find"])
     p.add_argument("terms", nargs="*")
     p.add_argument("--inst", action="store_true", help="включая инструменты")
+    p = add("multitrack", cmd_multitrack, "проект REAPER из папки с мультитреком: осмотр, с --build — сборка по раскладке")
+    p.add_argument("folder", nargs="?", default=".", help="папка с мультитреком (по умолчанию текущая)")
+    p.add_argument("--build", action="store_true", help="собрать проект по раскладке")
+    p.add_argument("--layout", help="файл раскладки (по умолчанию reaper/.reamix/multitrack/layout.txt)")
+    p.add_argument("--force", action="store_true", help="осмотр: пересоздать черновик раскладки; сборка: перезаписать .rpp")
+    p.add_argument("--no-open", action="store_true", help="не открывать готовый проект в REAPER")
     p = add("import-als", cmd_import_als, "перенести проект Ableton Live (.als) в проект REAPER")
     p.add_argument("file", help="путь к .als")
     p.add_argument("--out", help="папка для проекта REAPER (по умолчанию reaper/ рядом с .als)")

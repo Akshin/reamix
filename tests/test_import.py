@@ -150,7 +150,7 @@ def test_clip_controller_envelopes_become_midi_messages():
 
 def test_rpp_is_balanced_and_quotes_names():
     project = rpp.Project(90, (3, 4), [(0.0, 90.0), (4.0, 100.0)], [(1.5, 'Drop "A"')], tracks=[
-        rpp.Track('Lead "dry"', (255, 128, 0), 0.5, -0.3, True, (1, 1), envelopes=[rpp.Envelope("VOLENV2", [(0, 1, 0), (2, 0.5, 0)])]),
+        rpp.Track('Lead "dry"', (255, 128, 0), 0.5, -0.3, True, (1, 1), rpp.ABLETON_PAN_LAW, envelopes=[rpp.Envelope("VOLENV2", [(0, 1, 0), (2, 0.5, 0)])]),
         rpp.Track("it's `x` \"y\"", folder=(2, -1), fxchain="<FXCHAIN\nSHOW 0\n<VST \"VST: A\" a.vst 0 \"\" 1\nQUJD\n>\n>"),
     ])
     text = rpp.render(project)

@@ -1,4 +1,4 @@
-"""Запись проекта REAPER (.rpp) текстом: дорожки, папки, айтемы, посылы, огибающие, темп.
+"""Запись проекта REAPER (.rpp) текстом: дорожки, папки, айтемы, посылы, огибающие, темп, регионы.
 
 Пишется только то, что отличается от умолчаний REAPER: недостающие строки он дополняет сам.
 Блоки плагинов (fxchain) сюда приходят готовыми: их собирает живой REAPER
@@ -66,6 +66,7 @@ class Track:
     pan: float = 0.0
     mute: bool = False
     folder: tuple[int, int] = (0, 0)  # (1, 1) — открывает папку; (2, −n) — закрывает n папок
+    pan_law: float = -1.0  # −1 — закон панорамы проекта
     channels: int = 2
     main_send: bool = True
     receives: list[Receive] = field(default_factory=list)
@@ -80,6 +81,7 @@ class Project:
     timesig: tuple[int, int] = (4, 4)
     tempo_points: list[tuple[float, float]] = field(default_factory=list)  # (время, темп) — ступенями
     markers: list[tuple[float, str]] = field(default_factory=list)
+    regions: list[tuple[float, float, str]] = field(default_factory=list)  # начало, конец, имя
     master_vol: float = 1.0
     master_pan: float = 0.0
     master_envelopes: list[Envelope] = field(default_factory=list)
@@ -162,7 +164,7 @@ def _track(track: Track, index: int) -> list[str]:
     if track.color:
         lines.append(f"PEAKCOL {native_color(track.color)}")
     lines += [
-        f"VOLPAN {num(track.vol)} {num(track.pan)} {num(ABLETON_PAN_LAW)} -1 1", f"MUTESOLO {int(track.mute)} 0 0",
+        f"VOLPAN {num(track.vol)} {num(track.pan)} {num(track.pan_law)} -1 1", f"MUTESOLO {int(track.mute)} 0 0",
         f"ISBUS {track.folder[0]} {track.folder[1]}", f"NCHAN {track.channels}", f"TRACKID {guid(seed)}",
     ]
     for i, recv in enumerate(track.receives):
@@ -195,6 +197,8 @@ def render(project: Project) -> str:
     lines += _chain(project.master_fxchain, "MASTERFXLIST")
     for i, (time, name) in enumerate(project.markers, 1):
         lines.append(f"MARKER {i} {num(time)} {quote(name)} 0")
+    for i, (start, end, name) in enumerate(project.regions, 1):
+        lines += [f"MARKER {i} {num(start)} {quote(name)} 1", f'MARKER {i} {num(end)} "" 1']
     for i, track in enumerate(project.tracks):
         lines += _track(track, i)
     lines.append(">")

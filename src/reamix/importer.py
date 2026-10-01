@@ -535,6 +535,7 @@ def build(project: ableton.Project, out_dir: Path, data: Path, resolver: Resolve
         out.tracks.append(rpp.Track(
             t.name, (rgb >> 16, rgb >> 8 & 255, rgb & 255) if rgb is not None else None,
             0.0 if t.vol <= ableton.SILENCE else t.vol, t.pan, not t.on, (1, 1) if change > 0 else (2, change) if change < 0 else (0, 0),
+            pan_law=rpp.ABLETON_PAN_LAW,
         ))
         report["folders"] += change > 0
 

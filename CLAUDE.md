@@ -15,8 +15,9 @@ bridge/lib.lua            функции rx.* над проектом (пере�
 bridge/json.lua           Lua → JSON без потери точности
 bridge/import.lua         сборка цепочек плагинов для импорта из Ableton (грузится запросом)
 src/reamix/               CLI: client (обмен), store (снимки), fmt (компактный вид), plugins (каталог),
-                          analysis (метрики рендеров); импорт из Ableton: ableton (разбор .als),
-                          importer (пересчёт и порядок работ), rpp (запись проекта REAPER)
+                          analysis (метрики рендеров), multitrack (проект из папки с мультитреком),
+                          rpp (запись проекта REAPER); импорт из Ableton: ableton (разбор .als),
+                          importer (пересчёт и порядок работ)
 ~/.reamix/                данные пользователя, вне репозитория: plugins.tsv (каталог плагинов),
                           defaults/ (умолчания параметров), preferences.md (чем предпочитает сводить)
 skill/SKILL.md            справка по командам для сессий в папках треков
@@ -43,4 +44,5 @@ tests/fake_reaper.lua     подделка API REAPER для тестов
 
 ## Документация
 - [docs/architecture.md](docs/architecture.md) · [docs/DECISIONS.md](docs/DECISIONS.md) · [docs/CURRENT.md](docs/CURRENT.md)
+- Проект из мультитрека — основной способ начать трек: [docs/features/multitrack.md](docs/features/multitrack.md)
 - Импорт из Ableton: [docs/features/ableton-import.md](docs/features/ableton-import.md) — соответствие, форматы, что не проверено

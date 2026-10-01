@@ -9,6 +9,8 @@
 import json
 import os
 import re
+import subprocess
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -391,18 +393,42 @@ def assemble(layout: Layout, result: dict, out_dir: Path) -> tuple[rpp.Project, 
 # ── Команда ──────────────────────────────────────────────────────────────────
 
 
-def open_in_reaper(rpp_path: Path, timeout: float) -> dict | None:
-    """Открывает проект в REAPER, если там активна пустая вкладка; иначе его открывает человек."""
-    if client.alive() is None:
-        return None
+LAUNCH_WAIT = 90.0  # секунд на запуск REAPER и старт моста
+
+
+def reaper_running() -> bool:
+    return subprocess.run(["pgrep", "-x", "REAPER"], capture_output=True).returncode == 0
+
+
+def open_in_reaper(rpp_path: Path, timeout: float) -> tuple[dict | None, str]:
+    """Открывает и сохраняет проект в REAPER. Возвращает ответ моста и что произошло.
+
+    REAPER закрыт — запускается сразу с этим проектом. Открыт с пустой активной вкладкой —
+    проект встаёт в неё. Во вкладке чужой проект — не трогаем: его открывает человек.
+    """
     load = f'local imp = loadfile("{paths.ROOT / "bridge" / "import.lua"}")(rx, A) '
+    path = str(rpp_path).replace("\\", "\\\\").replace('"', '\\"')
+    if not reaper_running():
+        if subprocess.run(["open", "-a", "REAPER", str(rpp_path)], capture_output=True).returncode != 0:
+            return None, "REAPER не запустился"
+        deadline = time.monotonic() + LAUNCH_WAIT
+        while time.monotonic() < deadline:
+            beat = client.alive()
+            if beat and beat["age"] < 5 and str(beat.get("project", "")).lower() == str(rpp_path).lower():
+                try:
+                    return client.call(load + f'return imp.settle("{path}", {{}})', project=rpp_path.parent, timeout=max(timeout, 60)), "запущен"
+                except client.BridgeError:
+                    break
+            time.sleep(0.5)
+        return None, "REAPER запущен с проектом, но мост не ответил — сохрани проект сам (Cmd+S)"
+    if client.alive() is None:
+        return None, "REAPER открыт, но мост не запущен — открой файл сам (File → Open project) и сохрани"
     token = uuid.uuid4().hex
     try:
         client.call(load + f'return imp.workbench("{token}")', timeout=timeout)
-        path = str(rpp_path).replace("\\", "\\\\").replace('"', '\\"')
-        return client.call(load + f'return imp.open("{token}", "{path}", {{}})', timeout=max(timeout, 300))
+        return client.call(load + f'return imp.open("{token}", "{path}", {{}})', timeout=max(timeout, 300)), "открыт"
     except client.BridgeError:
-        return None
+        return None, "в активной вкладке REAPER другой проект — открой пустую вкладку (File → New project tab) и повтори с --force, либо открой файл сам и сохрани"
 
 
 def run(args) -> int:
@@ -435,12 +461,15 @@ def run(args) -> int:
     )
     for note in notes:
         print("  " + note)
-    opened = None if args.no_open else open_in_reaper(rpp_path, args.timeout)
+    if args.no_open:
+        return 0
+    opened, how = open_in_reaper(rpp_path, args.timeout)
     if opened:
-        state = "открыт в REAPER и сохранён" if opened.get("saved", True) else "открыт в REAPER, но помечен изменённым — сохрани"
-        print(f"проект {state}: дорожек {opened['tracks']}, айтемов {opened['items']}")
+        where = "REAPER запущен, проект открыт" if how == "запущен" else "проект открыт в REAPER"
+        state = "и сохранён" if opened.get("saved", True) else "но помечен изменённым — сохрани"
+        print(f"{where} {state}: дорожек {opened['tracks']}, айтемов {opened['items']}")
         if opened["offline"]:
             print(f"  REAPER не открыл файлы ({len(list(opened['offline']))}): " + ", ".join(Path(f).name for f in list(opened["offline"])[:6]))
     else:
-        print("в REAPER проект не открыт: нужна пустая активная вкладка — либо открой файл сам (File → Open project) и сохрани")
+        print(f"в REAPER проект не открыт: {how}")
     return 0

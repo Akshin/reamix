@@ -165,6 +165,7 @@ def test_project_is_assembled_from_layout(stems):
 
 def test_cli_scan_then_build(stems, monkeypatch, capsys):
     monkeypatch.setattr(paths, "IPC", stems.parent / ".ipc")  # моста нет
+    monkeypatch.setattr(multitrack, "reaper_running", lambda: True)
     monkeypatch.chdir(stems)
     layout = stems / "reaper/.reamix/multitrack/layout.txt"
     assert cli.main(["multitrack"]) == 0
@@ -181,7 +182,7 @@ def test_cli_scan_then_build(stems, monkeypatch, capsys):
     out = capsys.readouterr().out
     project = stems / "reaper" / "My Song.rpp"
     assert str(project.resolve()) in out and "дорожек 3 · папок 2 · темп 92.5 · размер 6/8 · регионов 2" in out
-    assert "в REAPER проект не открыт" in out
+    assert "в REAPER проект не открыт: REAPER открыт, но мост не запущен" in out
     text = project.read_text()
     assert text.count("<TRACK") == 5 and text.count("<ITEM") == 3 and 'FILE "../Song VOX.wav"' in text
 
@@ -200,6 +201,7 @@ def test_built_project_opens_in_blank_reaper_tab(stems, monkeypatch, capsys):
         calls.append(code.split("return imp.")[1].split("(")[0])
         return {"project": "x", "tracks": 5, "items": 3, "fx": 0, "offline": {}, "times": {}}
 
+    monkeypatch.setattr(multitrack, "reaper_running", lambda: True)
     monkeypatch.setattr(client, "alive", lambda: {"project": "", "age": 0})
     monkeypatch.setattr(client, "call", call)
     assert cli.main(["multitrack", "--build"]) == 0
@@ -210,7 +212,28 @@ def test_built_project_opens_in_blank_reaper_tab(stems, monkeypatch, capsys):
 
     monkeypatch.setattr(client, "call", busy)
     assert cli.main(["multitrack", "--build", "--force"]) == 0
-    assert "в REAPER проект не открыт" in capsys.readouterr().out
+    assert "в активной вкладке REAPER другой проект" in capsys.readouterr().out
+
+
+def test_closed_reaper_is_launched_with_the_project(stems, monkeypatch, capsys):
+    monkeypatch.chdir(stems)
+    cli.main(["multitrack"])
+    (stems / "reaper/.reamix/multitrack/layout.txt").write_text(LAYOUT)
+    project = (stems / "reaper" / "My Song.rpp").resolve()
+    launched, calls = [], []
+    monkeypatch.setattr(multitrack, "reaper_running", lambda: False)
+    monkeypatch.setattr(multitrack.subprocess, "run", lambda cmd, **kw: launched.append(cmd) or type("Done", (), {"returncode": 0})())
+    # Мост стартует вместе с REAPER и сообщает, что активен именно собранный проект.
+    monkeypatch.setattr(client, "alive", lambda: {"project": str(project), "age": 0} if launched else None)
+
+    def call(code, **kwargs):
+        calls.append((code.split("return imp.")[1].split("(")[0], kwargs.get("project")))
+        return {"tracks": 5, "items": 3, "offline": {}, "saved": True}
+
+    monkeypatch.setattr(client, "call", call)
+    assert cli.main(["multitrack", "--build"]) == 0
+    assert launched == [["open", "-a", "REAPER", str(project)]] and calls == [("settle", project.parent)]
+    assert "REAPER запущен, проект открыт и сохранён: дорожек 5, айтемов 3" in capsys.readouterr().out
 
 
 def test_session_in_multitrack_folder_works_with_project_in_reaper(stems, monkeypatch, capsys):

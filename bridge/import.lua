@@ -328,6 +328,11 @@ end
 function M.open(token, path, qn)
   on_workbench(token)
   r.Main_openProject('noprompt:' .. path)
+  return M.settle(path, qn)
+end
+
+-- Проект path уже активен (его открыл мост или REAPER был запущен с ним): сверка и сохранение.
+function M.settle(path, qn)
   local _, now = r.EnumProjects(-1)
   if (now or ''):lower() ~= path:lower() then fail('REAPER не открыл проект: ' .. path) end
   local offline = {}

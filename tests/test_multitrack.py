@@ -203,7 +203,7 @@ def test_built_project_opens_in_blank_reaper_tab(stems, monkeypatch, capsys):
     monkeypatch.setattr(client, "alive", lambda: {"project": "", "age": 0})
     monkeypatch.setattr(client, "call", call)
     assert cli.main(["multitrack", "--build"]) == 0
-    assert calls == ["workbench", "open"] and "проект открыт в REAPER: дорожек 5, айтемов 3" in capsys.readouterr().out
+    assert calls == ["workbench", "open"] and "проект открыт в REAPER и сохранён: дорожек 5, айтемов 3" in capsys.readouterr().out
 
     def busy(code, **kwargs):
         raise client.BridgeError("активная вкладка REAPER не пустая")

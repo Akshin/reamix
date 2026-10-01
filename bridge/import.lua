@@ -346,7 +346,10 @@ function M.open(token, path, qn)
   fx = fx + r.TrackFX_GetCount(r.GetMasterTrack(0))
   -- Сохраняем сразу: на диске оказывается проект в полном виде, каким его держит REAPER.
   r.Main_SaveProject(0, false)
-  return { project = now, tracks = r.CountTracks(0), items = r.CountMediaItems(0), fx = fx, offline = files, times = times }
+  return {
+    project = now, tracks = r.CountTracks(0), items = r.CountMediaItems(0), fx = fx, offline = files, times = times,
+    saved = r.IsProjectDirty(0) == 0,
+  }
 end
 
 -- Убирает временные треки, если проект в верстаке открывать не нужно.

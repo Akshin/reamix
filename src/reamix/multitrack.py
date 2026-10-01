@@ -437,9 +437,10 @@ def run(args) -> int:
         print("  " + note)
     opened = None if args.no_open else open_in_reaper(rpp_path, args.timeout)
     if opened:
-        print(f"проект открыт в REAPER: дорожек {opened['tracks']}, айтемов {opened['items']}")
+        state = "открыт в REAPER и сохранён" if opened.get("saved", True) else "открыт в REAPER, но помечен изменённым — сохрани"
+        print(f"проект {state}: дорожек {opened['tracks']}, айтемов {opened['items']}")
         if opened["offline"]:
             print(f"  REAPER не открыл файлы ({len(list(opened['offline']))}): " + ", ".join(Path(f).name for f in list(opened["offline"])[:6]))
     else:
-        print("в REAPER проект не открыт: нужна пустая активная вкладка — либо открой файл сам (File → Open project)")
+        print("в REAPER проект не открыт: нужна пустая активная вкладка — либо открой файл сам (File → Open project) и сохрани")
     return 0

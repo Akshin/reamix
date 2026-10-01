@@ -16,7 +16,7 @@
 ## Установка
 
 ```bash
-git clone <адрес репозитория> ~/reamix
+git clone https://github.com/Akshin/reamix.git ~/reamix
 ~/reamix/bin/reamix install
 ```
 

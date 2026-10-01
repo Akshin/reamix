@@ -453,6 +453,25 @@ def cmd_phase(args):
     prune_renders(data)
 
 
+def reference_file(name: str | None) -> Path:
+    """Референс: путь как есть, имя файла из references/ в папке трека, а без имени — единственный файл там."""
+    if name and Path(name).expanduser().is_file():
+        return Path(name).expanduser()
+    project = track_dir()
+    folder = (project.parent if project.name == "reaper" else project) / "references"
+    found = sorted(p for p in folder.iterdir() if p.is_file() and not p.name.startswith(".")) if folder.is_dir() else []
+    if name:
+        match = [p for p in found if p.name == name or p.stem == name] or [p for p in found if name.lower() in p.name.lower()]
+        if len(match) == 1:
+            return match[0]
+        raise client.BridgeError(f"файла нет: {name}" + (f" (в references/: {', '.join(p.name for p in found)})" if found else ""))
+    if len(found) == 1:
+        return found[0]
+    if not found:
+        raise client.BridgeError(f"референсов нет: положи файл в {folder} или укажи путь")
+    raise client.BridgeError("в references/ несколько файлов, укажи какой: " + ", ".join(p.name for p in found))
+
+
 def cmd_reference(args):
     """Сравнивает последний анализ микса с референсным файлом."""
     import subprocess
@@ -465,9 +484,7 @@ def cmd_reference(args):
     mixes = [r for r in (json.loads(p.read_text()) for p in reports) if "mix" in r["files"] and not r["files"]["mix"]["silent"]]
     if not mixes:
         raise client.BridgeError("анализа микса ещё нет — сначала reamix analyze")
-    source = Path(args.file).expanduser()
-    if not source.is_file():
-        raise client.BridgeError(f"файла нет: {source}")
+    source = reference_file(args.file)
     cache = data / "reference" / f"{source.stem}.json"
     if cache.is_file() and not args.fresh:
         ref = json.loads(cache.read_text())
@@ -742,7 +759,7 @@ def main(argv=None) -> int:
     p.add_argument("--region", help="имя или номер региона")
     p.add_argument("--range", help="участок в секундах: 16-32")
     p = add("reference", cmd_reference, "сравнить последний анализ микса с референсным файлом")
-    p.add_argument("file")
+    p.add_argument("file", nargs="?", help="путь или имя файла из references/; без него — единственный файл в references/")
     p.add_argument("--fresh", action="store_true", help="пересчитать референс заново")
     p = add("plugins", cmd_plugins, "каталог установленных плагинов")
     p.add_argument("action", choices=["scan", "find"])

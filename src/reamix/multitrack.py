@@ -18,8 +18,9 @@ from pathlib import Path
 from . import ableton, client, fmt, paths, rpp
 
 AUDIO = {".wav", ".aif", ".aiff", ".flac", ".mp3", ".ogg"}
-# Папки, в которых мультитрека не бывает: наш проект, служебное Ableton.
-SKIP_DIRS = {"reaper", "Backup", "Ableton Project Info", "Ableton Folder Info"}
+# Папки, в которых мультитрека не бывает: наш проект, референсы, служебное Ableton.
+SKIP_DIRS = {"reaper", "references", "backup", "ableton project info", "ableton folder info"}
+REFERENCES = "references"  # сюда человек кладёт референсные треки
 SILENT_DB = -80.0  # файл с пиком ниже — пустой: дорожка была выключена
 ACTIVE_BELOW_PEAK = 50.0  # дБ: тише пика настолько — пауза
 LOW_HZ, HIGH_HZ = 250.0, 4000.0
@@ -41,7 +42,7 @@ def find_files(folder: Path) -> list[Path]:
     """Аудиофайлы мультитрека, пути относительно папки. Samples/ пропускается только в папке проекта Ableton."""
     skip = set(SKIP_DIRS)
     if any(folder.glob("*.als")):
-        skip.add("Samples")
+        skip.add("samples")
     found = []
 
     def walk(directory: Path, top: bool):
@@ -49,7 +50,7 @@ def find_files(folder: Path) -> list[Path]:
             if entry.name.startswith("."):
                 continue
             if entry.is_dir():
-                if not (top and entry.name in skip):
+                if not (top and entry.name.lower() in skip):
                     walk(entry, False)
             elif entry.suffix.lower() in AUDIO:
                 found.append(entry.relative_to(folder))
@@ -452,6 +453,7 @@ def run(args) -> int:
         raise MultitrackError(f"проект уже есть: {rpp_path} — в нём может быть начатый микс. Перезаписать — с --force")
     project, notes = assemble(parse_layout(layout_file.read_text()), result, out_dir)
     rpp_path.write_text(rpp.render(project))
+    (folder / REFERENCES).mkdir(exist_ok=True)
 
     tracks = sum(1 for t in project.tracks if t.items)
     print(f"{rpp_path}")
@@ -461,6 +463,7 @@ def run(args) -> int:
     )
     for note in notes:
         print("  " + note)
+    print(f"референсы клади в {folder / REFERENCES}")
     if args.no_open:
         return 0
     opened, how = open_in_reaper(rpp_path, args.timeout)

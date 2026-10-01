@@ -55,6 +55,7 @@ def stems(tmp_path):
     (folder / "reaper" / "media").mkdir(parents=True)
     write(folder / "reaper" / "media" / "render.wav", tone(100))
     write(folder / "Backup" / "old.wav", tone(100))
+    write(folder / "references" / "ref.wav", tone(100))  # референсы — не мультитрек
     write(folder / "Samples" / "sample.wav", tone(100, seconds=4.0))
     return folder
 
@@ -185,6 +186,7 @@ def test_cli_scan_then_build(stems, monkeypatch, capsys):
     assert "в REAPER проект не открыт: REAPER открыт, но мост не запущен" in out
     text = project.read_text()
     assert text.count("<TRACK") == 5 and text.count("<ITEM") == 3 and 'FILE "../Song VOX.wav"' in text
+    assert (stems / "references").is_dir() and f"референсы клади в {(stems / 'references').resolve()}" in out
 
     project.write_text("мой микс")
     assert cli.main(["multitrack", "--build"]) == 1 and project.read_text() == "мой микс"
@@ -247,3 +249,21 @@ def test_session_in_multitrack_folder_works_with_project_in_reaper(stems, monkey
     assert cli.main(["init"]) == 0
     assert (stems / "CLAUDE.md").is_file() and (stems / "docs" / "CURRENT.md").is_file() and (stems / "reaper" / ".reamix").is_dir()
     assert not (stems / "reaper" / "CLAUDE.md").exists()
+
+
+def test_reference_is_found_in_references_folder(stems, monkeypatch):
+    monkeypatch.chdir(stems)
+    (stems / "reaper" / "My Song.rpp").write_text("<REAPER_PROJECT\n>\n")
+    refs = stems / "references"
+    (refs / "ref.wav").unlink()
+    with pytest.raises(client.BridgeError, match="референсов нет: положи файл в"):
+        cli.reference_file(None)
+    write(refs / "Daft Punk.wav", tone(100))
+    assert cli.reference_file(None) == refs / "Daft Punk.wav"  # один файл — берётся без имени
+    write(refs / "Other.wav", tone(100))
+    with pytest.raises(client.BridgeError, match="несколько файлов, укажи какой: Daft Punk.wav, Other.wav"):
+        cli.reference_file(None)
+    assert cli.reference_file("daft") == refs / "Daft Punk.wav" and cli.reference_file("Other.wav") == refs / "Other.wav"
+    assert cli.reference_file(str(refs / "Other.wav")) == refs / "Other.wav"
+    with pytest.raises(client.BridgeError, match=r"файла нет: nope \(в references/: Daft Punk.wav, Other.wav\)"):
+        cli.reference_file("nope")

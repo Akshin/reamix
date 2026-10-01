@@ -15,6 +15,7 @@ def machine(tmp_path, monkeypatch):
         "REAPER": reaper,
         "STARTUP": reaper / "Scripts" / "__startup.lua",
         "SKILL_LINK": tmp_path / ".claude" / "skills" / "reamix",
+        "SKILL_ABLETON_LINK": tmp_path / ".claude" / "skills" / "ableton-to-reaper",
         "BIN_DIRS": [tmp_path / "bin"],
         "USER": tmp_path / ".reamix",
         "CATALOG": tmp_path / ".reamix" / "plugins.tsv",
@@ -34,6 +35,8 @@ def test_install_then_uninstall_restores_the_machine(machine, capsys):
     startup = paths.STARTUP.read_text()
     assert startup.startswith(own_script) and str(paths.BRIDGE) in startup
     assert paths.SKILL_LINK.resolve() == paths.SKILL.resolve()
+    assert paths.SKILL_ABLETON_LINK.resolve() == paths.SKILL_ABLETON.resolve()
+    assert (paths.SKILL_ABLETON_LINK / "SKILL.md").read_text().startswith("---\nname: ableton-to-reaper\n")
     assert (machine / "bin" / "reamix").resolve() == paths.LAUNCHER.resolve()
     assert paths.PREFERENCES.read_text().startswith("# Мои предпочтения")
     assert paths.CATALOG.is_file()
@@ -46,7 +49,7 @@ def test_install_then_uninstall_restores_the_machine(machine, capsys):
 
     assert cli.main(["uninstall"]) == 0
     assert paths.STARTUP.read_text() == own_script
-    assert not paths.SKILL_LINK.is_symlink()
+    assert not paths.SKILL_LINK.is_symlink() and not paths.SKILL_ABLETON_LINK.is_symlink()
     assert not (machine / "bin" / "reamix").is_symlink()
     assert paths.PREFERENCES.read_text() == "мои правки"
 

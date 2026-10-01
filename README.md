@@ -10,20 +10,44 @@
 
 - REAPER 7 или новее
 - [Claude Code](https://claude.com/claude-code)
-- [uv](https://docs.astral.sh/uv/): `brew install uv`
-- ffmpeg — только для сравнения с референсом: `brew install ffmpeg`
+- [uv](https://docs.astral.sh/uv/) — запускает инструмент и сам ставит ему Python и библиотеки
+- git — чтобы скачать репозиторий (macOS предложит установить его при первом вызове)
+- ffmpeg — только для сравнения с референсом
+
+Python отдельно ставить не надо. Homebrew не обязателен, но с ним проще:
+
+```bash
+brew install uv ffmpeg
+```
+
+Без Homebrew uv ставится так:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
 
 ## Установка
 
+Проще всего попросить Claude Code. Открой его в любой папке и напиши:
+
+> Установи reamix из https://github.com/Akshin/reamix — действуй по INSTALL.md в репозитории.
+
+Claude скачает репозиторий, поставит недостающее, скажет, что меняет на машине, и попросит
+перезапустить REAPER.
+
+Вручную то же самое делается двумя командами:
+
 ```bash
 git clone https://github.com/Akshin/reamix.git ~/reamix
-~/reamix/bin/reamix install
+~/reamix/install.sh
 ```
+
+Первый запуск скачивает Python и библиотеки анализа (около 125 МБ на диске) — нужен интернет.
 
 Установка делает четыре вещи:
 
 - дописывает в `REAPER/Scripts/__startup.lua` строку автозапуска моста;
-- подключает скилл `reamix` в `~/.claude/skills/`;
+- подключает скиллы `reamix` и `ableton-to-reaper` в `~/.claude/skills/`;
 - кладёт ссылку на команду `reamix` в папку из PATH;
 - собирает каталог твоих плагинов в `~/.reamix/`.
 
@@ -62,8 +86,21 @@ Claude сам вызывает команды `reamix`. Правку он при
 | `reamix reference <файл>` | сравнить микс с референсом |
 | `reamix changes` | что изменилось с прошлого раза |
 | `reamix plugins find <слова>` | поиск по каталогу установленных плагинов |
+| `reamix import-als <файл.als>` | перенести проект Ableton Live в проект REAPER |
 
 Полный список — `reamix --help`; справка для Claude — [skill/SKILL.md](skill/SKILL.md).
+
+## Проект из Ableton
+
+Открой в REAPER пустую вкладку, а Claude Code — в папке проекта Ableton, и напиши:
+«перенеси этот проект в REAPER». Claude запустит `reamix import-als`, и рядом с `.als`
+появится папка `reaper/` с проектом: дорожки, группы, клипы с варпом, MIDI, плагины с их
+настройками, автоматизация. Сэмплы не копируются — оба проекта читают одни файлы.
+
+Не переносятся родные устройства Ableton (Echo, EQ Eight, Simpler и прочие): их в REAPER
+нет. Дорожку с ними можно заморозить в Ableton — тогда конвертер возьмёт её звук. Что
+перенеслось точно, что приблизительно и что потерялось, Claude расскажет по отчёту.
+Подробности — [docs/features/ableton-import.md](docs/features/ableton-import.md).
 
 ## Что где лежит
 

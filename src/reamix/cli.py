@@ -496,6 +496,13 @@ def cmd_plugins(args):
     print(f"найдено {len(rows)}" + (" · * — использовался недавно" if rows else ""))
 
 
+def cmd_import_als(args):
+    """Переносит проект Ableton Live в проект REAPER; плагины ставит мост."""
+    from . import importer
+
+    return importer.run(args)
+
+
 def cmd_init(args):
     """Заводит в папке трека документацию для Claude и служебную папку."""
     cwd = Path.cwd()
@@ -545,6 +552,11 @@ def bin_link() -> Path | None:
     return None
 
 
+def skills() -> list[tuple[Path, Path]]:
+    """Скиллы для Claude Code: ссылка в ~/.claude/skills → папка в репозитории."""
+    return [(paths.SKILL_LINK, paths.SKILL), (paths.SKILL_ABLETON_LINK, paths.SKILL_ABLETON)]
+
+
 def cmd_install(args):
     """Автозапуск моста в REAPER, скилл для Claude Code, команда в PATH, данные пользователя."""
     if not paths.REAPER.is_dir():
@@ -559,12 +571,13 @@ def cmd_install(args):
         paths.STARTUP.write_text(text + tail + "-- reamix: мост для сведения с Claude\n" + startup_line() + "\n")
         print(f"автозапуск добавлен: {paths.STARTUP}")
 
-    if paths.SKILL_LINK.is_symlink() or paths.SKILL_LINK.exists():
-        print(f"скилл уже есть: {paths.SKILL_LINK}")
-    else:
-        paths.SKILL_LINK.parent.mkdir(parents=True, exist_ok=True)
-        paths.SKILL_LINK.symlink_to(paths.SKILL)
-        print(f"скилл подключён: {paths.SKILL_LINK} → {paths.SKILL}")
+    for link, folder in skills():
+        if link.is_symlink() or link.exists():
+            print(f"скилл уже есть: {link}")
+        else:
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(folder)
+            print(f"скилл подключён: {link} → {folder}")
 
     link = bin_link()
     if link is None:
@@ -596,9 +609,10 @@ def cmd_uninstall(args):
             else:
                 paths.STARTUP.unlink()
             print(f"автозапуск убран: {paths.STARTUP}")
-    if paths.SKILL_LINK.is_symlink() and paths.SKILL_LINK.resolve() == paths.SKILL.resolve():
-        paths.SKILL_LINK.unlink()
-        print(f"скилл отключён: {paths.SKILL_LINK}")
+    for link, folder in skills():
+        if link.is_symlink() and link.resolve() == folder.resolve():
+            link.unlink()
+            print(f"скилл отключён: {link}")
     for folder in paths.BIN_DIRS:
         link = folder / "reamix"
         if link.is_symlink() and link.resolve() == paths.LAUNCHER.resolve():
@@ -619,8 +633,8 @@ def cmd_doctor(args):
     check(paths.REAPER.is_dir(), f"папка REAPER: {paths.REAPER}", f"папка REAPER не найдена: {paths.REAPER}")
     startup = paths.STARTUP.exists() and str(paths.BRIDGE) in paths.STARTUP.read_text()
     check(startup, "автозапуск моста прописан", "автозапуска нет — reamix install")
-    skill = paths.SKILL_LINK.exists()
-    check(skill, f"скилл подключён: {paths.SKILL_LINK}", "скилл не подключён — reamix install")
+    for link, _ in skills():
+        check(link.exists(), f"скилл подключён: {link}", f"скилл {link.name} не подключён — reamix install")
     check(shutil.which("reamix") is not None, "команда reamix в PATH", f"команды нет в PATH — вызывай {paths.LAUNCHER}")
     check(shutil.which("ffmpeg") is not None, "ffmpeg найден", "ffmpeg не найден — нужен для reamix reference")
     check(paths.CATALOG.is_file(), f"каталог плагинов: {paths.CATALOG}", "каталога плагинов нет — reamix plugins scan")
@@ -719,6 +733,15 @@ def main(argv=None) -> int:
     p.add_argument("action", choices=["scan", "find"])
     p.add_argument("terms", nargs="*")
     p.add_argument("--inst", action="store_true", help="включая инструменты")
+    p = add("import-als", cmd_import_als, "перенести проект Ableton Live (.als) в проект REAPER")
+    p.add_argument("file", help="путь к .als")
+    p.add_argument("--out", help="папка для проекта REAPER (по умолчанию reaper/ рядом с .als)")
+    p.add_argument("--force", action="store_true", help="перезаписать уже существующий .rpp")
+    p.add_argument("--no-plugins", action="store_true", help="только дорожки, клипы и автоматизация микшера — REAPER не нужен")
+    p.add_argument("--unsaved-ok", action="store_true", help="грузить плагины, даже если в REAPER есть несохранённые изменения")
+    p.add_argument("--no-open", action="store_true", help="не открывать готовый проект в REAPER")
+    p.add_argument("--copy-media", action="store_true", help="скопировать в проект файлы, лежащие вне папки проекта Ableton")
+    p.add_argument("--ignore-freeze", action="store_true", help="у замороженных дорожек брать исходные клипы и живые плагины, а не звук заморозки")
     add("init", cmd_init, "завести в папке трека документацию и служебную папку")
     add("install", cmd_install, "автозапуск моста, скилл, команда в PATH, каталог плагинов")
     add("uninstall", cmd_uninstall, "убрать автозапуск, скилл и команду (данные остаются)")

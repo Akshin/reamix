@@ -1,0 +1,5 @@
+#!/bin/sh
+# Запуск CLI из любой папки: окружение — проекта reamix, рабочая папка — текущая.
+target=$(readlink "$0" 2>/dev/null || echo "$0")
+root=$(cd "$(dirname "$target")/.." && pwd)
+exec uv run --quiet --project "$root" reamix "$@"

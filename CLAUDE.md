@@ -20,7 +20,7 @@ src/reamix/               CLI: client (обмен), store (снимки), fmt (�
                           importer (пересчёт и порядок работ)
 ~/.reamix/                данные пользователя, вне репозитория: plugins.tsv (каталог плагинов),
                           defaults/ (умолчания параметров), preferences.md (чем предпочитает сводить)
-skill/SKILL.md            справка по командам для сессий в папках треков
+skill/SKILL.md            этапы сведения и справка по командам для сессий в папках треков
 skill-ableton/SKILL.md    скилл ableton-to-reaper: перенос проекта Ableton командой reamix import-als
 templates/                шаблоны: документация трека (reamix init), предпочтения
 tests/fake_reaper.lua     подделка API REAPER для тестов

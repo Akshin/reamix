@@ -836,7 +836,8 @@ local function record_dir()
 end
 
 -- Офлайн-рендер в папку opts.dir. opts.tracks — список треков для стемов (после плагинов
--- и фейдера); opts.mix — ещё и общий микс; opts.range = {t0, t1} — участок, иначе весь проект.
+-- и фейдера; с opts.prefader — до фейдера и панорамы); opts.mix — ещё и общий микс;
+-- opts.range = {t0, t1} — участок, иначе весь проект.
 -- Настройки рендера проекта и выделение треков возвращаются как были.
 function rx.render(opts)
   local saved_num, saved_str, selected = {}, {}, {}
@@ -890,7 +891,7 @@ function rx.render(opts)
         local tr = rx.track(ref)
         if i == 1 then r.SetOnlyTrackSelected(tr) else r.SetTrackSelected(tr, true) end
       end
-      pass(3, 'stem-$tracknumber')
+      pass(3 + (opts.prefader and 8192 or 0), 'stem-$tracknumber')
     end
   end)
 
@@ -902,6 +903,83 @@ function rx.render(opts)
   if media_dir and not had_media_dir then os.remove(media_dir) end
   if not ok then error(err, 0) end
   return { dir = opts.dir, files = files, offline = offline_sources(), rev = r.GetProjectStateChangeCount(0) }
+end
+
+-- ── Гейн-стейджинг ────────────────────────────────────────────────────────
+
+local TRIM = 'JS:utility/volume'
+
+-- Трим — «JS: Volume Adjustment» первым плагином дорожки.
+local function has_trim(tr)
+  if r.TrackFX_GetCount(tr) == 0 then return false end
+  local _, ident = r.TrackFX_GetNamedConfigParm(tr, 0, 'fx_ident')
+  return ident == 'utility/volume'
+end
+
+local function fx_active(tr, fx)
+  return r.TrackFX_GetEnabled(tr, fx) and not r.TrackFX_GetOffline(tr, fx)
+end
+
+-- Ставит трим первым плагином (или берёт уже стоящий) и задаёт поправку в дБ.
+function rx.trim(track, db)
+  local tr = rx.track(track)
+  if not has_trim(tr) then rx.fx_add(tr, TRIM, 1) end
+  r.TrackFX_SetEnabled(tr, 0, true)
+  return rx.fx_set(tr, 1, 0, { raw = db })
+end
+
+-- Стемы до фейдера на каждой ступени цепочки плагинов трека: вход (все плагины выключены),
+-- затем после каждого работающего плагина. Плагины выключаются только на время рендера.
+function rx.chain_render(track, dir, range)
+  local tr = rx.track(track)
+  local n = r.TrackFX_GetCount(tr)
+  local on, off = {}, A {}
+  for fx = 0, n - 1 do
+    on[fx] = fx_active(tr, fx)
+    if not on[fx] then
+      local _, name = r.TrackFX_GetFXName(tr, fx, '')
+      off[#off + 1] = { fx = fx + 1, name = name }
+    end
+  end
+  local steps = rx.scratch(function()
+    local steps = A {}
+    for k = 0, n do
+      if k == 0 or on[k - 1] then
+        for fx = 0, n - 1 do r.TrackFX_SetEnabled(tr, fx, on[fx] and fx < k) end
+        local res = rx.render({ dir = dir .. '/' .. k, tracks = { tr }, range = range, prefader = true })
+        local name = ''
+        if k > 0 then _, name = r.TrackFX_GetFXName(tr, k - 1, '') end
+        steps[#steps + 1] = { fx = k, name = name, file = res.files[1] }
+      end
+    end
+    return steps
+  end)
+  return { steps = steps, off = off, trim = has_trim(tr) and on[0] }
+end
+
+-- Стемы треков до плагинов и фейдера — уровень источника, под который ставится трим.
+-- Про каждый трек: поправка уже стоящего трима и остальные работающие плагины.
+function rx.input_render(tracks, dir, range)
+  local list, info = {}, A {}
+  for _, ref in ipairs(tracks) do
+    local tr = rx.track(ref)
+    local trim, others = has_trim(tr), A {}
+    for fx = trim and 1 or 0, r.TrackFX_GetCount(tr) - 1 do
+      if fx_active(tr, fx) then
+        local _, name = r.TrackFX_GetFXName(tr, fx, '')
+        others[#others + 1] = name
+      end
+    end
+    list[#list + 1] = tr
+    info[#info + 1] = { n = track_number(tr), trim = trim and r.TrackFX_GetParam(tr, 0, 0) or nil, others = others }
+  end
+  local res = rx.scratch(function()
+    for _, tr in ipairs(list) do
+      for fx = 0, r.TrackFX_GetCount(tr) - 1 do r.TrackFX_SetEnabled(tr, fx, false) end
+    end
+    return rx.render({ dir = dir, tracks = list, range = range, prefader = true })
+  end)
+  return { files = res.files, tracks = info }
 end
 
 -- ── Снимки ────────────────────────────────────────────────────────────────

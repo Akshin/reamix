@@ -48,6 +48,9 @@ local catalog = {
       { name = 'Style', norm = 0, fmt = function(norm) return ({ 'Clean', 'Punch', 'Vocal' })[math.min(3, math.floor(norm * 3) + 1)] end },
     }
   end,
+  ['JS: utility/volume'] = function()
+    return { { name = 'Adjustment (dB)', norm = 0, fmt = function(v) return string.format('%.1f', v) end } }
+  end,
 }
 
 local function installed(name)
@@ -162,15 +165,18 @@ function R.TrackFX_FormatParamValueNormalized(tr, i, p, v)
 end
 function R.TrackFX_SetParamNormalized(tr, i, p, v) tr.fx[i + 1].params[p + 1].norm = v touch() return true end
 function R.TrackFX_SetParam(tr, i, p, v) tr.fx[i + 1].params[p + 1].norm = v touch() return true end
-function R.TrackFX_AddByName(tr, name)
+-- instantiate: -1 — в конец цепочки, -1000 - i — на место i (с нуля).
+function R.TrackFX_AddByName(tr, name, _, instantiate)
   if name:find('Missing') then return -1 end
-  tr.fx[#tr.fx + 1] = installed(name)
+  local at = instantiate and instantiate <= -1000 and math.min(-1000 - instantiate, #tr.fx) or #tr.fx
+  table.insert(tr.fx, at + 1, installed(name))
   touch()
-  return #tr.fx - 1
+  return at
 end
 function R.TrackFX_GetNamedConfigParm(tr, i, key)
   local plugin = tr.fx[i + 1]
   if key == 'fx_name' then return true, plugin.name end
+  if key == 'fx_ident' and plugin.name:find('^JS: ') then return true, (plugin.name:gsub('^JS: ', '')) end
   if key == 'fx_ident' then return true, '/Plug-Ins/' .. plugin.name:gsub('^%w+: ', '') .. '.vst<1' end
   return false, ''
 end

@@ -453,6 +453,111 @@ def cmd_phase(args):
     prune_renders(data)
 
 
+def chain_levels(args, data: Path, track: dict, t0: float, t1: float) -> dict:
+    """Уровень трека до фейдера на каждой ступени цепочки плагинов."""
+    from . import analysis
+
+    render_dir = data / "renders" / f"{time.strftime('%Y%m%d-%H%M%S')}-gain"
+    result = client.call(
+        f"return rx.chain_render({track['n']}, {lua(str(render_dir))}, {{{t0!r}, {t1!r}}})",
+        project=guard(args), timeout=max(args.timeout, 1800),
+    )
+    for step in result["steps"]:
+        path = Path(step.pop("file"))
+        if not path.is_file():
+            raise client.BridgeError(f"REAPER не записал {path.name} — рендер отменён?")
+        step |= analysis.level(analysis.Audio.read(path))
+    return result
+
+
+def cmd_gain(args):
+    """Гейн-стейджинг трека: уровень на входе цепочки и после каждого плагина."""
+    from . import analysis
+
+    data = project_data(args)
+    sk = client.call("return rx.skeleton()", project=guard(args), timeout=args.timeout)
+    track = pick_tracks(sk, args.track)[0]
+    t0, t1 = pick_range(sk, args)
+    chain = chain_levels(args, data, track, t0, t1)
+    prune_renders(data)
+    steps = chain["steps"]
+    entry = steps[1] if chain["trim"] and len(steps) > 1 else steps[0]
+    need = None
+    if entry["avg"] is not None:
+        gain, _ = analysis.trim_gain(entry["avg"], entry["peak"])
+        need = gain if abs(gain) >= analysis.TRIM_STEP_DB else None
+    print(fmt.gain_ladder(track, (t0, t1), chain, need))
+
+
+def input_levels(args, data: Path, tracks: list[dict], t0: float, t1: float) -> dict[int, dict]:
+    """Уровень источника (до плагинов и фейдера) по трекам: номер → уровень, стоящий трим, прочие плагины."""
+    from . import analysis
+
+    # Источники не влияют на вход друг друга — их меряем одним рендером. Шина получает
+    # звук других треков, уже обработанный их плагинами: каждую — отдельным проходом.
+    buses = [t for t in tracks if t["folder"] or t["receives"]]
+    passes = [[t for t in tracks if t not in buses]] + [[t] for t in buses]
+    out = {}
+    for i, group in enumerate(p for p in passes if p):
+        render_dir = data / "renders" / f"{time.strftime('%Y%m%d-%H%M%S')}-trim-{i}"
+        numbers = ", ".join(str(t["n"]) for t in group)
+        result = client.call(
+            f"return rx.input_render({{{numbers}}}, {lua(str(render_dir))}, {{{t0!r}, {t1!r}}})",
+            project=guard(args), timeout=max(args.timeout, 1800),
+        )
+        info = {t["n"]: t for t in result["tracks"]}
+        for path in map(Path, result["files"]):
+            if not path.is_file():
+                raise client.BridgeError(f"REAPER не записал {path.name} — рендер отменён?")
+            n = int(re.fullmatch(r"stem-(\d+)", path.stem).group(1))
+            out[n] = info[n] | analysis.level(analysis.Audio.read(path))
+        shutil.rmtree(render_dir, ignore_errors=True)  # стемы всех дорожек за весь трек — гигабайты
+    return out
+
+
+def cmd_trim(args):
+    """Ставит трим первым плагином: источник приводится к рабочему уровню плагинов."""
+    from . import analysis
+
+    data = project_data(args)
+    sk = client.call("return rx.skeleton()", project=guard(args), timeout=args.timeout)
+    if args.tracks:
+        wanted = pick_tracks(sk, ",".join(args.tracks))
+    else:
+        wanted = [t for t in sk["tracks"] if t["items"] and not t["folder"]]
+    tracks = [t for t in wanted if not t["mute"]]
+    if not tracks:
+        raise client.BridgeError("дорожек для трима нет")
+    t0, t1 = pick_range(sk, args)
+    levels = input_levels(args, data, tracks, t0, t1)
+
+    rows, edits = [], []
+    for t in tracks:
+        m = levels[t["n"]]
+        row = {"n": t["n"], "name": t["name"], "avg": m["avg"], "peak": m["peak"], "old": m.get("trim")}
+        rows.append(row)
+        if m["avg"] is None:
+            row["note"] = "молчит на участке"
+            continue
+        gain, row["by_peak"] = analysis.trim_gain(m["avg"], m["peak"], args.target, args.peak)
+        if row["old"] is not None and abs(gain - row["old"]) < analysis.TRIM_STEP_DB:
+            row["new"] = row["old"]
+            continue
+        row["new"] = 0.0 if abs(gain) < analysis.TRIM_STEP_DB else gain
+        if m["others"] and not args.with_fx:
+            row["note"] = "не тронут — после трима стоят плагины, он изменит их работу: --with-fx"
+        else:
+            edits.append(row)
+
+    muted = [f"{t['n']} {t['name']}" for t in wanted if t["mute"]]
+    print(fmt.trim_table((t0, t1), rows, args.target, args.peak, muted))
+    if args.dry_run or not edits:
+        return
+    code = "\n".join(f"rx.trim({row['n']}, {row['new']!r})" for row in edits)
+    _, changes = apply_edit(args, data, f"трим: дорожек {len(edits)} к {args.target:g} dBFS", code)
+    print("изменено:\n  " + "\n  ".join(changes) if changes else "изменений в состоянии нет")
+
+
 def reference_file(name: str | None) -> Path:
     """Референс: путь как есть, имя файла из references/ в папке трека, а без имени — единственный файл там."""
     if name and Path(name).expanduser().is_file():
@@ -758,6 +863,18 @@ def main(argv=None) -> int:
     p.add_argument("tracks", nargs="+", help="две или больше дорожек: номера или имена")
     p.add_argument("--region", help="имя или номер региона")
     p.add_argument("--range", help="участок в секундах: 16-32")
+    p = add("gain", cmd_gain, "уровень трека на входе цепочки и после каждого плагина")
+    p.add_argument("track", help="номер или имя трека")
+    p.add_argument("--region", help="имя или номер региона")
+    p.add_argument("--range", help="участок в секундах: 16-32")
+    p = add("trim", cmd_trim, "трим первым плагином: привести источник к рабочему уровню плагинов")
+    p.add_argument("tracks", nargs="*", help="номера или имена; без них — все дорожки со звуком, кроме папок")
+    p.add_argument("--region", help="имя или номер региона")
+    p.add_argument("--range", help="участок в секундах: 16-32")
+    p.add_argument("--target", type=float, default=-18.0, help="средний уровень, dBFS (по умолчанию −18)")
+    p.add_argument("--peak", type=float, default=-6.0, help="предел пиков, dBFS (по умолчанию −6)")
+    p.add_argument("--with-fx", action="store_true", help="ставить и там, где после трима уже стоят плагины")
+    p.add_argument("--dry-run", action="store_true", help="только показать поправки")
     p = add("reference", cmd_reference, "сравнить последний анализ микса с референсным файлом")
     p.add_argument("file", nargs="?", help="путь или имя файла из references/; без него — единственный файл в references/")
     p.add_argument("--fresh", action="store_true", help="пересчитать референс заново")

@@ -254,6 +254,17 @@ def test_undo_after_listening_to_before_keeps_it_undone(fake, capsys, tmp_path):
     assert journal == ["первая", "вторая", "откат: вторая", "откат: первая"]
 
 
+def test_trim_goes_first_and_is_reused(fake):
+    assert client.call('return rx.trim("Kick", -4.5)')["raw"] == -4.5
+    chain = [fx["name"] for fx in client.call('return rx.track_info("Kick").fx')]
+    assert chain == ["JS: utility/volume", "VST: ReaEQ (Cockos)", "VST3: Pro-C 2 (FabFilter)"]
+    # Второй вызов правит стоящий трим, а не ставит ещё один.
+    client.call('rx.fx_enable("Kick", 1, false) rx.trim("Kick", 2)')
+    info = client.call('return rx.track_info("Kick")')
+    assert [fx["name"] for fx in info["fx"]] == chain and info["fx"][0]["enabled"]
+    assert client.call('return rx.fx_params("Kick", 1).params[1].fmt') == "2.0"
+
+
 def test_text_option_is_set_by_name(fake):
     assert [o["text"] for o in client.call('return rx.fx_options("Kick", "Pro-C", "Style")')] == ["Clean", "Punch", "Vocal"]
     assert client.call('return rx.fx_set("Kick", "Pro-C", "Style", {text = "Punch"})')["fmt"] == "Punch"
@@ -270,3 +281,28 @@ def test_unanswered_request_is_withdrawn(tmp_path, monkeypatch):
     with pytest.raises(client.BridgeError, match="последний сигнал 60 с назад"):
         client.request("return 1", timeout=0.2)
     assert not (ipc / "request.lua").exists()
+
+
+def test_gain_ladder_and_trim_table_name_what_to_fix():
+    track = {"n": 5, "name": "Vox"}
+    step = lambda fx, name, avg, lufs: {"fx": fx, "name": name, "avg": avg, "peak": avg + 10, "lufs": lufs}  # noqa: E731
+    chain = {
+        "trim": True, "off": [{"fx": 4, "name": "VST3: Pro-Q 4 (FabFilter)"}],
+        "steps": [step(0, "", -25.0, -26.0), step(1, "JS: Volume Adjustment", -18.0, -19.0), step(2, "VST: ReaComp (Cockos)", -21.0, -22.0)],
+    }
+    lines = fmt.gain_ladder(track, (16.0, 32.0), chain, None).splitlines()
+    assert lines[2].endswith("+7.0  трим") and lines[3].endswith("-3.0 !")
+    assert lines[4:] == ["выключены: 4 Pro-Q 4", "вход в плагины на рабочем уровне", "увели уровень больше чем на 1 дБ: 2 ReaComp"]
+    assert "нужна поправка -6.0 дБ — reamix trim 5" in fmt.gain_ladder(track, (0, 1), chain | {"trim": False}, -6.0)
+
+    rows = [
+        {"n": 2, "name": "Kick", "avg": -24.1, "peak": -8.0, "old": None, "new": 2.0, "by_peak": True},
+        {"n": 7, "name": "Pad", "avg": -18.4, "peak": -9.9, "old": -3.0, "new": -3.0, "by_peak": False},
+        {"n": 3, "name": "Hats", "avg": None, "peak": -120.0, "old": None, "note": "молчит на участке"},
+    ]
+    assert fmt.trim_table((0.0, 60.0), rows, -18.0, -6.0, ["9 Old"]).splitlines()[1:] == [
+        "  2 Kick  вход  -24.1  пик   -8.0  трим +2.0 (по пикам)",
+        "  7 Pad   вход  -18.4  пик   -9.9  трим -3.0 — как было",
+        "  3 Hats  молчит на участке",
+        "пропущены (mute): 9 Old",
+    ]

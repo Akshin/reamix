@@ -270,6 +270,42 @@ def conflicts(series: dict[str, dict], skip: set[frozenset], limit: int = 8) -> 
     return found[:limit]
 
 
+# ── Гейн-стейджинг ───────────────────────────────────────────────────────────
+
+WORK_LEVEL_DB = -18.0  # рабочий уровень плагинов: 0 VU у эмуляций аналога
+WORK_PEAK_DB = -6.0
+TRIM_STEP_DB = 1.0  # поправка меньше этой не нужна: рабочий уровень — зона, а не точка
+
+
+def level(audio: Audio) -> dict:
+    """Уровень для гейн-стейджинга. avg — средний по звучащим местам, без частотного
+    взвешивания, по более громкому каналу, в шкале VU: синус с пиком −18 dBFS даёт −18.
+    Паузы отсекаются гейтом, как в BS.1770. None — тишина."""
+    peak = float(20 * np.log10(max(np.abs(audio.data).max(), 1e-10)))
+    if peak < SILENCE_DB:
+        return {"avg": None, "peak": peak, "lufs": None}
+    size, hop = int(0.4 * audio.sr), int(HOP_SEC * audio.sr)
+    if len(audio.data) >= size:
+        energy = np.concatenate([np.zeros((1, 2)), np.cumsum(audio.data**2, axis=0)])
+        starts = np.arange(0, len(audio.data) - size + 1, hop)
+        blocks = ((energy[starts + size] - energy[starts]) / size).max(axis=1)
+    else:
+        blocks = (audio.data**2).mean(axis=0).max(keepdims=True)
+    blocks = 2 * blocks  # синус с пиком P: средний квадрат P²/2 → показание P
+    loud = blocks[to_db(blocks) > -70]
+    if not len(loud):
+        return {"avg": None, "peak": peak, "lufs": None}
+    loud = loud[to_db(loud) > to_db(loud.mean()) - 10]
+    return {"avg": float(to_db(loud.mean())), "peak": peak, "lufs": integrated(audio)}
+
+
+def trim_gain(avg: float, peak: float, target: float = WORK_LEVEL_DB, ceiling: float = WORK_PEAK_DB) -> tuple[float, bool]:
+    """Поправка трима в дБ: средний уровень к target, но пики не выше ceiling.
+    Второе значение — решил ли предел по пикам (ударные)."""
+    by_peak = ceiling - peak < target - avg
+    return round(min(target - avg, ceiling - peak), 1), by_peak
+
+
 # ── Райдинг громкости ────────────────────────────────────────────────────────
 
 MOMENTARY_WINDOW = 0.4

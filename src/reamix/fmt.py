@@ -94,3 +94,62 @@ def fx_params(info: dict, note: str = "") -> str:
     for p in shown:
         lines.append(f"{p['p']:>4}  {p['name']} = {p['fmt']}  ({p['norm']:.4f})")
     return "\n".join(lines)
+
+
+def _level(value) -> str:
+    return "тишина" if value is None else f"{value:6.1f}"
+
+
+def gain_ladder(track: dict, span: tuple[float, float], chain: dict, need: float | None) -> str:
+    """Уровень трека по ступеням цепочки плагинов. need — поправка, которой не хватает на входе в плагины."""
+    steps = chain["steps"]
+    names = ["вход"] + [f"{s['fx']} {fx_short(s['name'])}" for s in steps[1:]]
+    width = max(len(n) for n in names)
+    lines = [
+        f"уровни по цепочке · {track['n']} {track['name']} · {clock(span[0])}–{clock(span[1])} · "
+        "до фейдера, dBFS: средний / пик / LUFS и его сдвиг на плагине"
+    ]
+    moved = []
+    for i, (name, s) in enumerate(zip(names, steps)):
+        line = f"  {name:<{width}}  {_level(s['avg'])}  пик {s['peak']:6.1f}"
+        if s["lufs"] is not None:
+            line += f"  {s['lufs']:6.1f} LUFS"
+        is_trim = chain["trim"] and s["fx"] == 1
+        if i and s["lufs"] is not None and steps[i - 1]["lufs"] is not None:
+            delta = s["lufs"] - steps[i - 1]["lufs"]
+            line += f"  {delta:+5.1f}"
+            if abs(delta) >= 1 and not is_trim:
+                line += " !"
+                moved.append(name)
+        lines.append(line + ("  трим" if is_trim else ""))
+    if chain["off"]:
+        lines.append("выключены: " + ", ".join(f"{fx['fx']} {fx_short(fx['name'])}" for fx in chain["off"]))
+    entry = steps[1] if chain["trim"] and len(steps) > 1 else steps[0]
+    if entry["avg"] is None:
+        lines.append("вход молчит на участке")
+    elif need:
+        lines.append(f"вход в плагины не на рабочем уровне: нужна поправка {need:+.1f} дБ — reamix trim {track['n']}")
+    else:
+        lines.append("вход в плагины на рабочем уровне" + ("" if chain["trim"] else " (трима нет)"))
+    if moved:
+        lines.append("увели уровень больше чем на 1 дБ: " + ", ".join(moved))
+    return "\n".join(lines)
+
+
+def trim_table(span: tuple[float, float], rows: list[dict], target: float, ceiling: float, muted: list[str]) -> str:
+    names = [f"{r['n']} {r['name']}" for r in rows]
+    width = max(len(n) for n in names)
+    lines = [f"трим · {clock(span[0])}–{clock(span[1])} · средний уровень к {target:g} dBFS, пики не выше {ceiling:g}"]
+    for name, r in zip(names, rows):
+        if r["avg"] is None:
+            lines.append(f"  {name:<{width}}  {r['note']}")
+            continue
+        line = f"  {name:<{width}}  вход {r['avg']:6.1f}  пик {r['peak']:6.1f}  трим {r['new']:+.1f}"
+        if r["old"] is not None:
+            line += " — как было" if r["new"] == r["old"] else f", было {r['old']:+.1f}"
+        if r["by_peak"]:
+            line += " (по пикам)"
+        lines.append(line + (f" · {r['note']}" if r.get("note") else ""))
+    if muted:
+        lines.append("пропущены (mute): " + ", ".join(muted))
+    return "\n".join(lines)

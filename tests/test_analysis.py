@@ -139,6 +139,26 @@ def test_phase_finds_delay_and_polarity():
     assert analysis.phase_verdict(analysis.phase(stereo(source), stereo(np.zeros_like(source)))) == "одна из дорожек молчит"
 
 
+def test_level_reads_like_a_vu_meter_and_skips_pauses():
+    tone = sine(1000, 10 ** (-18 / 20))
+    assert analysis.level(stereo(tone))["avg"] == pytest.approx(-18.0, abs=0.05)
+    # Звук только в одном канале и низкая частота показывают то же: взвешивания нет.
+    assert analysis.level(stereo(tone, np.zeros_like(tone)))["avg"] == pytest.approx(-18.0, abs=0.05)
+    low = analysis.level(stereo(sine(40, 10 ** (-18 / 20))))
+    assert low["avg"] == pytest.approx(-18.0, abs=0.05) and low["lufs"] < -22
+    # Паузы между фразами средний уровень не занижают.
+    sparse = np.concatenate([tone, np.zeros(len(tone) * 3)])
+    assert analysis.level(stereo(sparse))["avg"] == pytest.approx(-18.0, abs=0.3)
+    assert analysis.level(stereo(np.zeros(SR)))["avg"] is None
+
+
+def test_trim_brings_average_to_working_level_unless_peaks_object():
+    assert analysis.trim_gain(-12.0, -3.0) == (-6.0, False)
+    assert analysis.trim_gain(-25.0, -15.0) == (7.0, False)
+    # Ударное: по среднему можно поднять на 12 дБ, но пики тогда уйдут выше −6.
+    assert analysis.trim_gain(-30.0, -8.0) == (2.0, True)
+
+
 def test_ride_vs_mix_follows_the_backing():
     # Вокал ровный (−20), а остальной микс в припеве громче на 6 LU: вокал там проседает относительно него.
     vocal = np.full(100, -20.0)

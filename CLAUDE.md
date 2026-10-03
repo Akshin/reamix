@@ -15,7 +15,8 @@ bridge/lib.lua            функции rx.* над проектом (пере�
 bridge/json.lua           Lua → JSON без потери точности
 bridge/import.lua         сборка цепочек плагинов для импорта из Ableton (грузится запросом)
 src/reamix/               CLI: client (обмен), store (снимки), fmt (компактный вид), plugins (каталог),
-                          analysis (метрики рендеров), multitrack (проект из папки с мультитреком),
+                          analysis (метрики рендеров), groove (атаки и их попадание в сетку),
+                          multitrack (проект из папки с мультитреком),
                           rpp (запись проекта REAPER); импорт из Ableton: ableton (разбор .als),
                           importer (пересчёт и порядок работ)
 ~/.reamix/                данные пользователя, вне репозитория: plugins.tsv (каталог плагинов),

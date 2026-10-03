@@ -93,6 +93,10 @@ def _track_changes(old: dict, new: dict) -> list[str]:
         if old[key] != new[key]:
             out.append(f"{key} {old[key]} → {new[key]}")
 
+    # В снимках, сделанных до появления сдвига, его нет: там он нулевой.
+    if abs(old.get("offset_ms", 0) - new.get("offset_ms", 0)) > 1e-6:
+        out.append(f"сдвиг {old.get('offset_ms', 0):+g} → {new.get('offset_ms', 0):+g} мс")
+
     old_fx = {fx["guid"]: fx for fx in old["fx"]}
     new_fx = {fx["guid"]: fx for fx in new["fx"]}
     for guid, fx in new_fx.items():

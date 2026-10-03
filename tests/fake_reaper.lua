@@ -29,6 +29,7 @@ local function track(name, depth, plugins)
     vals = {
       D_VOL = 1, D_PAN = 0, D_WIDTH = 1, B_MUTE = 0, I_SOLO = 0, B_PHASE = 0,
       B_MAINSEND = 1, I_NCHAN = 2, I_AUTOMODE = 0, I_FOLDERDEPTH = 0,
+      I_PLAY_OFFSET_FLAG = 1, D_PLAY_OFFSET = 0,
     },
   }
 end
@@ -94,6 +95,10 @@ function R.GetProjectLength() return 205.5 end
 function R.IsProjectDirty() return 0 end
 function R.CountTempoTimeSigMarkers() return 0 end
 function R.CountProjectMarkers() return 1, 0, 1 end
+-- Темп постоянный: 120 уд/мин, 4/4 — такт длится 2 с.
+function R.TimeMap2_timeToBeats(_, t) return (t % 2) * 2, math.floor(t / 2), 4, t * 2, 4 end
+function R.TimeMap_GetMeasureInfo(_, m) return m * 2, m * 4, (m + 1) * 4, 4, 4, 120 end
+function R.TimeMap2_QNToTime(_, qn) return qn / 2 end
 function R.EnumProjectMarkers3() return 1, true, 30, 60, 'Chorus', 1, 0 end
 
 function R.Undo_BeginBlock2() F.saved = { tracks = copy(F.tracks), master = copy(F.master), rev = F.rev } end
@@ -139,7 +144,9 @@ function R.SetMediaTrackInfo_Value(tr, key, value) tr.vals[key] = value touch() 
 
 function R.GetTrackNumSends() return 0 end
 function R.CountTrackEnvelopes() return 0 end
-function R.CountTrackMediaItems() return 0 end
+function R.CountTrackMediaItems(tr) return tr.items and #tr.items or 0 end
+function R.GetTrackMediaItem(tr, i) return tr.items[i + 1] end
+function R.GetMediaItemInfo_Value(item, key) return item[key] end
 function R.TrackFX_GetRecCount() return 0 end
 function R.Audio_IsRunning() return 1 end
 function R.Audio_Init() end

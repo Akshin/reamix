@@ -265,6 +265,28 @@ def test_trim_goes_first_and_is_reused(fake):
     assert client.call('return rx.fx_params("Kick", 1).params[1].fmt') == "2.0"
 
 
+def test_grid_follows_measures(fake):
+    # Подделка: 120 уд/мин, 4/4. Шестнадцатые (0,25 четверти) с середины первого такта.
+    grid = client.call("return rx.grid(1.0, 2.5, 0.25)")
+    assert grid["t"] == [1.0 + 0.125 * i for i in range(12)]
+    assert grid["k"] == [8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3] and set(grid["beat"]) == {1}
+    assert client.call("return rx.grid(0, 2, 1 / 3)")["k"] == list(range(12))
+
+
+def test_track_offset_shows_in_state_and_changes(fake, capsys):
+    client.call("reaper._fake.tracks[2].items = {{D_POSITION = 0, D_LENGTH = 8}}")
+    assert client.call('return rx.track_info("Kick").offset_ms') == 0
+    assert cli.main(["do", "малый позже", 'rx.track_set("Kick", {offset_ms = 12})']) == 0
+    assert "2 Kick: сдвиг +0 → +12 мс" in capsys.readouterr().out
+    assert " 2    Kick  +12ms  fx:" in fmt.skeleton(client.call("return rx.skeleton()"))
+    # Сдвиг двигает айтемы самой дорожки: на папке он ничего не сделает.
+    with pytest.raises(client.BridgeError, match="у папки ставь его на её дорожки"):
+        client.call('rx.track_set("Drums", {offset_ms = 12})')
+    # Ноль выключает сдвиг: дорожка возвращается в состояние нового трека.
+    client.call('rx.track_set("Kick", {offset_ms = 0})')
+    assert client.call('local tr = rx.track("Kick") return {reaper.GetMediaTrackInfo_Value(tr, "I_PLAY_OFFSET_FLAG"), rx.track_info(tr).offset_ms}') == [1, 0]
+
+
 def test_text_option_is_set_by_name(fake):
     assert [o["text"] for o in client.call('return rx.fx_options("Kick", "Pro-C", "Style")')] == ["Clean", "Punch", "Vocal"]
     assert client.call('return rx.fx_set("Kick", "Pro-C", "Style", {text = "Punch"})')["fmt"] == "Punch"

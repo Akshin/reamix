@@ -558,6 +558,61 @@ def cmd_trim(args):
     print("изменено:\n  " + "\n  ".join(changes) if changes else "изменений в состоянии нет")
 
 
+def cmd_groove(args):
+    """Грув: атаки дорожек и их попадание в сетку проекта или в удары опорной дорожки."""
+    import numpy as np
+
+    from . import groove
+
+    data = project_data(args)
+    sk = client.call("return rx.skeleton()", project=guard(args), timeout=args.timeout)
+    wanted = pick_tracks(sk, ",".join(args.tracks)) if args.tracks else [t for t in sk["tracks"] if t["items"] and not t["folder"]]
+    anchor = pick_tracks(sk, args.anchor)[0] if args.anchor else None
+    if anchor and anchor["mute"]:
+        raise client.BridgeError(f"опорная дорожка {anchor['n']} {anchor['name']} заглушена (mute)")
+    tracks = [t for t in wanted if not t["mute"] and t is not anchor]
+    if not tracks:
+        raise client.BridgeError("дорожек для замера нет")
+    t0, t1 = pick_range(sk, args)
+    step = groove.GRIDS[args.grid]
+    grid = client.call(f"return rx.grid({t0!r}, {t1!r}, {step / 24!r})", project=guard(args), timeout=args.timeout)
+    if len(grid["t"]) < 2:
+        raise client.BridgeError("участок короче двух шагов сетки — мерить нечего")
+    lines, labels = np.array(grid["t"]), groove.line_levels(grid["k"], grid["beat"], step)
+
+    pre = min(groove.PREROLL, t0)
+    files = render_stems(args, data, tracks + ([anchor] if anchor else []), t0 - pre, t1, "groove")
+    onsets = {n: groove.read_onsets(path, t0 - pre, pre, args.floor) for n, path in files.items()}
+    shutil.rmtree(next(iter(files.values())).parent, ignore_errors=True)  # стемы всех дорожек — гигабайты
+
+    if anchor and len(onsets[anchor["n"]][0]["t"]) < 2:
+        raise client.BridgeError(f"у опорной дорожки {anchor['n']} {anchor['name']} на участке меньше двух атак")
+    rows = []
+    for t in tracks:
+        hits, silent = onsets[t["n"]]
+        found = groove.against_anchor(hits, onsets[anchor["n"]][0]["t"]) if anchor else groove.against_grid(hits, lines, labels, step)
+        rows.append({"n": t["n"], "name": t["name"], "silent": silent, "shift": t.get("offset_ms") or None} | found)
+
+    span = f"{fmt.clock(t0)}–{fmt.clock(t1)}"
+    if anchor:
+        head = f"грув · {span} · относительно {anchor['n']} {anchor['name']} (ударов {len(onsets[anchor['n']][0]['t'])}) · «+» позже опоры, «−» раньше, мс"
+    else:
+        head = f"грув · {span} · {groove.tempo(lines, step)} · «+» позже сетки, «−» раньше, мс"
+    print(groove.table(head, rows, anchor is not None))
+    if len(tracks) < len(wanted) - (anchor in wanted):
+        print("пропущены (mute): " + ", ".join(f"{t['n']} {t['name']}" for t in wanted if t["mute"]))
+    if any(t["solo"] for t in sk["tracks"]):
+        print("в проекте включён solo — стемы остальных треков пустые")
+
+    run = data / "groove" / f"{time.strftime('%Y%m%d-%H%M%S')}-rev{sk['project']['rev']}"
+    run.mkdir(parents=True)
+    report = {
+        "id": run.name, "range": [t0, t1], "grid": args.grid, "anchor": anchor and anchor["n"], "floor_db": args.floor,
+        "hit": ["время, с", "смещение, мс", "место в такте", "сила, дБ от сильных", "атака, мс"], "tracks": rows,
+    }
+    (run / "report.json").write_text(json.dumps(report, ensure_ascii=False))
+
+
 def reference_file(name: str | None) -> Path:
     """Референс: путь как есть, имя файла из references/ в папке трека, а без имени — единственный файл там."""
     if name and Path(name).expanduser().is_file():
@@ -875,6 +930,13 @@ def main(argv=None) -> int:
     p.add_argument("--peak", type=float, default=-6.0, help="предел пиков, dBFS (по умолчанию −6)")
     p.add_argument("--with-fx", action="store_true", help="ставить и там, где после трима уже стоят плагины")
     p.add_argument("--dry-run", action="store_true", help="только показать поправки")
+    p = add("groove", cmd_groove, "грув: попадание атак дорожек в сетку проекта или в удары опорной дорожки, мс")
+    p.add_argument("tracks", nargs="*", help="номера или имена; без них — все дорожки со звуком, кроме папок")
+    p.add_argument("--region", help="имя или номер региона")
+    p.add_argument("--range", help="участок в секундах: 16-32")
+    p.add_argument("--grid", choices=["4", "8", "16", "32", "8t", "16t"], default="16", help="шаг сетки: 16 — шестнадцатые (по умолчанию), 8t — триольные восьмые")
+    p.add_argument("--anchor", help="мерить относительно ударов этой дорожки, а не сетки (запись без клика)")
+    p.add_argument("--floor", type=float, default=15.0, help="не считать удары тише сильных на столько дБ (по умолчанию 15)")
     p = add("reference", cmd_reference, "сравнить последний анализ микса с референсным файлом")
     p.add_argument("file", nargs="?", help="путь или имя файла из references/; без него — единственный файл в references/")
     p.add_argument("--fresh", action="store_true", help="пересчитать референс заново")

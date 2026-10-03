@@ -43,19 +43,23 @@ end
 
 -- ── Проект ────────────────────────────────────────────────────────────────
 
-function rx.project()
-  local _, path = r.EnumProjects(-1)
-  local bpm, beats = r.GetProjectTimeSignature2(0)
+local function project_srate()
   local srate = r.GetSetProjectInfo(0, 'PROJECT_SRATE', 0, false)
   if r.GetSetProjectInfo(0, 'PROJECT_SRATE_USE', 0, false) == 0 then
     local ok, device = r.GetAudioDeviceInfo('SRATE')
     if ok then srate = tonumber(device) or srate end
   end
+  return srate
+end
+
+function rx.project()
+  local _, path = r.EnumProjects(-1)
+  local bpm, beats = r.GetProjectTimeSignature2(0)
   return {
     path = path or '',
     bpm = bpm,
     beats = beats,
-    srate = srate,
+    srate = project_srate(),
     length = r.GetProjectLength(0),
     dirty = r.IsProjectDirty(0) == 1,
     rev = r.GetProjectStateChangeCount(0),
@@ -74,6 +78,28 @@ function rx.markers()
     }
   end
   return out
+end
+
+-- Линии сетки проекта на участке t0..t1. step — шаг в четвертях; сетка идёт от начала
+-- каждого такта, как линейка REAPER. Про каждую линию: время, номер шага от начала такта
+-- и длина доли в четвертях (4 / знаменатель размера).
+function rx.grid(t0, t1, step)
+  local t, k, beat = A {}, A {}, A {}
+  local _, measure = r.TimeMap2_timeToBeats(0, t0)
+  while true do
+    local start, qn0, qn1, _, denom = r.TimeMap_GetMeasureInfo(0, measure)
+    if start >= t1 or qn1 <= qn0 then break end
+    local i = 0
+    while qn0 + i * step < qn1 - 1e-9 do
+      local at = r.TimeMap2_QNToTime(0, qn0 + i * step)
+      if at >= t0 - 1e-9 and at < t1 then
+        t[#t + 1], k[#k + 1], beat[#beat + 1] = at, i, 4 / denom
+      end
+      i = i + 1
+    end
+    measure = measure + 1
+  end
+  return { t = t, k = k, beat = beat }
 end
 
 -- ── Треки ─────────────────────────────────────────────────────────────────
@@ -160,6 +186,15 @@ local function envelope_list(tr)
   return out
 end
 
+-- Сдвиг воспроизведения дорожки в мс: плюс — звучит позже. Это «Media playback offset»
+-- в окне роутинга трека; айтемы остаются на месте.
+local function play_offset(tr)
+  local flag = math.floor(r.GetMediaTrackInfo_Value(tr, 'I_PLAY_OFFSET_FLAG'))
+  if flag & 1 == 1 then return 0 end
+  local value = r.GetMediaTrackInfo_Value(tr, 'D_PLAY_OFFSET')
+  return flag & 2 == 2 and value / project_srate() * 1000 or value * 1000
+end
+
 local function track_info(tr)
   local function get(key) return r.GetMediaTrackInfo_Value(tr, key) end
   local n_items = r.CountTrackMediaItems(tr)
@@ -183,6 +218,7 @@ local function track_info(tr)
     mute = get('B_MUTE') == 1,
     solo = get('I_SOLO') ~= 0,
     phase = get('B_PHASE') == 1,
+    offset_ms = play_offset(tr),
     main_send = get('B_MAINSEND') == 1,
     channels = math.floor(get('I_NCHAN')),
     automode = math.floor(get('I_AUTOMODE')),
@@ -223,6 +259,13 @@ function rx.track_set(ref, props)
     elseif k == 'mute' then set('B_MUTE', v and 1 or 0)
     elseif k == 'solo' then set('I_SOLO', v and 1 or 0)
     elseif k == 'phase' then set('B_PHASE', v and 1 or 0)
+    elseif k == 'offset_ms' then
+      if v ~= 0 and r.CountTrackMediaItems(tr) == 0 then
+        fail('сдвиг действует на айтемы самой дорожки, а у «' .. track_name(tr) .. '» их нет: у папки ставь его на её дорожки')
+      end
+      -- Ноль — сдвиг выключен, как у нового трека.
+      set('I_PLAY_OFFSET_FLAG', v == 0 and 1 or 0)
+      set('D_PLAY_OFFSET', v / 1000)
     elseif k == 'name' then r.GetSetMediaTrackInfo_String(tr, 'P_NAME', v, true)
     else fail('неизвестное свойство трека: ' .. tostring(k)) end
   end

@@ -49,6 +49,8 @@ def track_line(t: dict, master: bool = False) -> str:
     for flag in ("mute", "solo", "phase"):
         if t[flag]:
             parts.append(flag)
+    if abs(t.get("offset_ms", 0)) >= 0.05:
+        parts.append(f"{t['offset_ms']:+g}ms")
     if not master and not t["main_send"]:
         parts.append("no-master")
     if t["channels"] != 2:

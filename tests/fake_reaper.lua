@@ -2,7 +2,7 @@
 -- Моделирует ровно то, что используют bridge/*.lua: треки, плагины с параметрами,
 -- историю undo, ExtState и defer. Реальное поведение API проверяется только вживую.
 
-local F = { rev = 100, ext = {}, undo = {}, redo = {}, path = '/music/song/main.rpp' }
+local F = { rev = 100, ext = {}, undo = {}, redo = {}, renders = {}, path = '/music/song/main.rpp' }
 
 local function hz(norm) return string.format('%.1f Hz', 20 * 1000 ^ norm) end
 local function khz(norm)
@@ -47,6 +47,17 @@ local catalog = {
       { name = 'Ratio', norm = 0.2, fmt = ratio },
       { name = 'Sidechain HP', norm = 0.1, fmt = khz },
       { name = 'Style', norm = 0, fmt = function(norm) return ({ 'Clean', 'Punch', 'Vocal' })[math.min(3, math.floor(norm * 3) + 1)] end },
+    }
+  end,
+  ['VST: ReaDelay (Cockos)'] = function()
+    return {
+      { name = 'Predelay', norm = 0, fmt = function(norm) return string.format('%.1f ms', norm * 500) end },
+      -- Шкала, на которой миллисекунды переходят в секунды.
+      { name = 'Length', norm = 0, fmt = function(norm)
+        local ms = 1 + norm * 1999
+        if ms >= 1000 then return string.format('%.2f s', ms / 1000) end
+        return string.format('%.1f ms', ms)
+      end },
     }
   end,
   ['JS: utility/volume'] = function()
@@ -142,8 +153,28 @@ function R.GetMediaTrackInfo_Value(tr, key)
 end
 function R.SetMediaTrackInfo_Value(tr, key, value) tr.vals[key] = value touch() return true end
 
+-- Рендер: файлов подделка не пишет, запоминает только, кто был в solo в его момент.
+function R.GetSetProjectInfo_String() return true, '' end
+function R.CountSelectedTracks() return 0 end
+function R.SetTrackSelected() end
+function R.SetOnlyTrackSelected() end
+function R.CountMediaItems() return 0 end
+function R.Main_OnCommand(id)
+  if id ~= 42230 then return end
+  local solo = {}
+  for _, t in ipairs(F.tracks) do if t.vals.I_SOLO ~= 0 then solo[#solo + 1] = t.name end end
+  F.renders[#F.renders + 1] = table.concat(solo, ',')
+end
+
 function R.GetTrackNumSends() return 0 end
-function R.CountTrackEnvelopes() return 0 end
+-- Огибающие параметров плагинов: tr.envs = { { fx = 0, p = 1, name = '…' }, … }.
+function R.CountTrackEnvelopes(tr) return tr.envs and #tr.envs or 0 end
+function R.GetTrackEnvelope(tr, i) tr.envs[i + 1].tr = tr return tr.envs[i + 1] end
+function R.GetEnvelopeName(env) return true, env.name end
+function R.GetSetEnvelopeInfo_String(env, key) return true, key == 'ACTIVE' and (env.active == false and '0' or '1') or '' end
+function R.CountEnvelopePoints() return 2 end
+function R.CountAutomationItems() return 0 end
+function R.Envelope_GetParentTrack(env) return env.tr, env.fx, env.p end
 function R.CountTrackMediaItems(tr) return tr.items and #tr.items or 0 end
 function R.GetTrackMediaItem(tr, i) return tr.items[i + 1] end
 function R.GetMediaItemInfo_Value(item, key) return item[key] end

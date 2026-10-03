@@ -89,6 +89,14 @@ def test_equal_levels_mask_each_other_and_skip_pairs_are_ignored():
     assert analysis.conflicts(series_of(*signals), {frozenset(("a", "b"))}) == []
 
 
+def test_bus_fader_after_the_stem_counts_in_masking():
+    # Стемы сняты до фейдеров шин: дорожка, чья шина убрана на 20 дБ, в миксе никого не накрывает.
+    signals = (("a", sine(200, 0.3)), ("b", sine(200, 0.3)))
+    found = analysis.conflicts(series_of(*signals), set(), {"b": -20.0})
+    assert [(c["victim"], c["masker"]) for c in found] == [("b", "a")]
+    assert found[0]["diff_db"] == pytest.approx(20, abs=0.5)
+
+
 def test_segments_merge_short_gaps_and_keep_the_longest():
     mask = np.zeros(300, dtype=bool)
     mask[10:40] = True      # 1,0–4,0 с

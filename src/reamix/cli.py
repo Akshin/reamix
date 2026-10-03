@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import math
 import re
 import os
 import shutil
@@ -141,9 +142,36 @@ def apply_edit(args, data: Path, label: str, code: str, snapshot: bool = True):
     if snap:
         after = store.ingest(resp["snap_after"], data, "after", label)
         store.cleanup_staging(data)
-        changes = store.diff(before, after) if before else []
+        changes = changes_between(args, data, before, after) if before else []
     store.log_edit(data, label, before, after)
     return resp.get("result"), changes
+
+
+PARAMS_SHOWN = 6  # сдвинувшихся параметров на плагин в списке изменений
+
+
+def changes_between(args, data: Path, old: dict, new: dict) -> list[str]:
+    """Список изменений между снимками; new — текущее состояние: показания параметров
+    («было» и «стало», как их пишет плагин) спрашиваются у живого плагина."""
+    moves = [(track, fx, moved) for track, per_fx in store.param_moves(data, old, new).items() for fx, moved in per_fx.items()]
+    lines: dict[str, list[str]] = {}
+    if moves:
+        ask = ", ".join(
+            f"{{track = {lua(track)}, fx = {lua(fx)}, params = {{"
+            + ", ".join(f"{{{p}, {a!r}, {b!r}}}" for p, a, b in moved[:PARAMS_SHOWN]) + "}}"
+            for track, fx, moved in moves
+        )
+        try:
+            found = client.call(f"return rx.params_describe({{{ask}}})", project=guard(args), timeout=args.timeout)
+        except client.BridgeError:
+            found = []  # правка уже применена: без имён параметров список изменений всё равно нужен
+        for (track, _, moved), entry in zip(moves, found):
+            if "name" not in entry:
+                continue
+            shown = [f"{p['name']} {p['was']} → {p['now']}" for p in entry["params"]]
+            more = f" … и ещё {len(moved) - len(shown)}" if len(moved) > len(shown) else ""
+            lines.setdefault(track, []).append(f"fx {entry['i']} {fmt.fx_short(entry['name'])}: " + ", ".join(shown) + more)
+    return store.diff(old, new, lines)
 
 
 def cmd_do(args):
@@ -217,7 +245,7 @@ def cmd_changes(args):
         print(f"без изменений с {previous['id']}")
         return
     _, now = take_snapshot(args, "check", "")
-    changes = store.diff(previous, now)
+    changes = changes_between(args, data, previous, now)
     print(f"с {previous['id']}:\n  " + "\n  ".join(changes) if changes else "изменений в состоянии треков нет")
 
 
@@ -240,12 +268,20 @@ def pick_tracks(sk: dict, spec: str | None) -> list[dict]:
     return chosen
 
 
+def parse_span(text: str) -> tuple[float, float]:
+    """Участок «начало-конец»: в секундах (16-32) или минутах (1:04-1:36.5)."""
+    m = re.fullmatch(r"(?:(\d+):)?(\d+(?:\.\d+)?)-(?:(\d+):)?(\d+(?:\.\d+)?)", text.strip())
+    if not m:
+        raise client.BridgeError(f"участок задаётся как начало-конец, в секундах или минутах: 16-32, 1:04-1:36 (получено «{text}»)")
+    a, b = int(m.group(1) or 0) * 60 + float(m.group(2)), int(m.group(3) or 0) * 60 + float(m.group(4))
+    if b <= a:
+        raise client.BridgeError(f"конец участка не позже начала: {text}")
+    return a, b
+
+
 def pick_range(sk: dict, args) -> tuple[float, float]:
     if args.range:
-        m = re.fullmatch(r"([\d.]+)-([\d.]+)", args.range)
-        if not m:
-            raise client.BridgeError("--range задаётся как начало-конец в секундах: 16-32")
-        return float(m.group(1)), float(m.group(2))
+        return parse_span(args.range)
     if args.region:
         regions = [m for m in sk["markers"] if m["region"]]
         found = [m for m in regions if str(m["n"]) == args.region] or [m for m in regions if args.region.lower() in m["name"].lower()]
@@ -268,6 +304,36 @@ def unrelated_pairs(sk: dict, label: dict) -> set[frozenset]:
     return skip
 
 
+def bus_gains(sk: dict) -> dict[int, float]:
+    """На сколько дБ шины двигают дорожку по пути в микс: её стем снят до них. Шина — папка
+    или трек, куда дорожка уходит посылом вместо мастера. Считаются только фейдеры шин и
+    уровень посыла: обработка на шине и её автоматизация в поправку не входят."""
+    by_n = {t["n"]: t for t in sk["tracks"]}
+    parent, stack = {}, []
+    for t in sk["tracks"]:
+        del stack[t["depth"]:]
+        if stack:
+            parent[t["n"]] = stack[-1]
+        stack.append(t["n"])
+
+    def db(gain: float) -> float:
+        return 20 * math.log10(max(gain, 1e-6))
+
+    def onward(n: int, seen: tuple = ()) -> float:
+        t = by_n[n]
+        if n in seen:
+            return 0.0
+        if t["main_send"]:
+            up = parent.get(n)
+            return 0.0 if up is None else db(by_n[up]["vol"]) + onward(up, seen + (n,))
+        sends = [s for s in t["sends"] if s.get("dst_chan", 0) < 2 and not s["mute"] and s.get("dest") in by_n]
+        if len(sends) != 1:
+            return 0.0
+        return db(sends[0]["vol"]) + db(by_n[sends[0]["dest"]]["vol"]) + onward(sends[0]["dest"], seen + (n,))
+
+    return {n: gain for n in by_n if abs(gain := onward(n)) >= 0.05}
+
+
 def cmd_analyze(args):
     """Рендерит микс и стемы, считает метрики, печатает сводку; полные данные — в .reamix/analysis."""
     from . import analysis  # numpy и scipy нужны только здесь
@@ -282,8 +348,6 @@ def cmd_analyze(args):
     notes = []
     if len(tracks) < len(wanted):
         notes.append("пропущены (mute): " + ", ".join(f"{t['n']} {t['name']}" for t in wanted if t["mute"]))
-    if any(t["solo"] for t in sk["tracks"]):
-        notes.append("в проекте включён solo — стемы остальных треков будут пустыми")
 
     # Тот же участок тех же треков в том же состоянии уже считали — берём готовый отчёт.
     def state_key() -> tuple[str, dict]:
@@ -307,6 +371,8 @@ def cmd_analyze(args):
     )
     if result["offline"]:
         notes.append("источники не открылись (в рендере их нет): " + ", ".join(sorted(set(result["offline"]))))
+    if result.get("unsoloed"):
+        notes.append("solo на время рендера снят (в проекте остался): " + ", ".join(result["unsoloed"]))
     label = {t["n"]: f"{t['n']} {t['name']}" for t in tracks}
     files = {}
     for path in map(Path, result["files"]):
@@ -325,8 +391,11 @@ def cmd_analyze(args):
 
     # Рендер сам меняет внутреннее состояние части плагинов (измерители, задержки):
     # состояние «после» — то же самое для кэша, что и «до».
+    offsets = {label[n]: gain for n, gain in bus_gains(sk).items() if n in label}
+    if offsets:
+        notes.append("в маскировании учтены фейдеры шин (обработка и автоматизация на шинах — нет)")
     meta = {"id": run, "keys": [key, state_key()[0]], "range": [t0, t1], "snapshot": snap["id"], "notes": notes}
-    report = analysis.analyze(files, regions, unrelated_pairs(sk, label), data / "analysis" / run, meta)
+    report = analysis.analyze(files, regions, unrelated_pairs(sk, label), data / "analysis" / run, meta, offsets)
     print(analysis.summary(report))
     prune_renders(data)
 
@@ -633,7 +702,7 @@ def reference_file(name: str | None) -> Path:
 
 
 def cmd_reference(args):
-    """Сравнивает последний анализ микса с референсным файлом."""
+    """Сравнивает анализ микса с референсным файлом — целиком или часть с частью."""
     import subprocess
     import tempfile
 
@@ -644,28 +713,47 @@ def cmd_reference(args):
     mixes = [r for r in (json.loads(p.read_text()) for p in reports) if "mix" in r["files"] and not r["files"]["mix"]["silent"]]
     if not mixes:
         raise client.BridgeError("анализа микса ещё нет — сначала reamix analyze")
+    if args.region or args.range:
+        sk = client.call("return rx.skeleton()", project=guard(args), timeout=args.timeout)
+        t0, t1 = pick_range(sk, args)
+        mixes = [r for r in mixes if abs(r["range"][0] - t0) < 0.01 and abs(r["range"][1] - t1) < 0.01]
+        if not mixes:
+            raise client.BridgeError(f"анализа участка {fmt.clock(t0)}–{fmt.clock(t1)} нет — сначала reamix analyze с тем же участком")
+    span = parse_span(args.ref_range) if args.ref_range else None
     source = reference_file(args.file)
-    cache = data / "reference" / f"{source.stem}.json"
+    cache = data / "reference" / (source.stem + (f"-{span[0]:g}-{span[1]:g}" if span else "") + ".json")
     if cache.is_file() and not args.fresh:
         ref = json.loads(cache.read_text())
     else:
         # ffmpeg читает любой формат (mp3, m4a, flac) и приводит к float WAV.
         with tempfile.TemporaryDirectory() as tmp:
             wav = Path(tmp) / "ref.wav"
+            cut = ["-ss", f"{span[0]:g}", "-to", f"{span[1]:g}"] if span else []
             done = subprocess.run(
-                ["ffmpeg", "-v", "error", "-y", "-i", str(source), "-ac", "2", "-c:a", "pcm_f32le", str(wav)],
+                ["ffmpeg", "-v", "error", "-y", *cut, "-i", str(source), "-ac", "2", "-c:a", "pcm_f32le", str(wav)],
                 capture_output=True, text=True,
             )
             if done.returncode != 0:
                 raise client.BridgeError(f"ffmpeg не прочитал файл: {done.stderr.strip()[:200]}")
-            ref, _ = analysis.measure(analysis.Audio.read(wav), [])
+            audio = analysis.Audio.read(wav)
+            if audio.seconds < 0.5:
+                raise client.BridgeError(f"в референсе на этом участке нет звука: {args.ref_range} (файл короче?)")
+            ref, _ = analysis.measure(audio, [])
         cache.parent.mkdir(exist_ok=True)
         cache.write_text(json.dumps(ref, ensure_ascii=False))
     if ref["silent"]:
         raise client.BridgeError("референс — тишина")
     latest = mixes[-1]
-    print(f"анализ {latest['id']} · {fmt.clock(latest['range'][0])}–{fmt.clock(latest['range'][1])} против {source.name} ({fmt.clock(ref['seconds'])})")
+    mix_len = latest["range"][1] - latest["range"][0]
+    ref_part = f"{fmt.clock(span[0])}–{fmt.clock(span[1])}" if span else f"целиком, {fmt.clock(ref['seconds'])}"
+    print(f"анализ {latest['id']} · {fmt.clock(latest['range'][0])}–{fmt.clock(latest['range'][1])} против {source.name} ({ref_part})")
     print(analysis.compare(latest["files"]["mix"], ref, source.stem[:24]))
+    # Участок против целого трека — разные вещи: тихое вступление референса сдвигает и баланс, и LRA.
+    if max(mix_len, ref["seconds"]) > 2 * min(mix_len, ref["seconds"]):
+        print(
+            f"длины различаются ({fmt.clock(mix_len)} и {fmt.clock(ref['seconds'])}): часть с частью — "
+            "--region/--range для микса и --ref-range для референса"
+        )
 
 
 def cmd_plugins(args):
@@ -891,7 +979,7 @@ def main(argv=None) -> int:
     p = add("ab", cmd_ab, "переключить последнюю правку: до / после (для сравнения на слух)")
     p.add_argument("state", nargs="?", choices=["before", "after"], help="без аргумента — в другое состояние")
     p.add_argument("--region", help="запустить этот регион по кругу")
-    p.add_argument("--range", help="запустить участок по кругу: 16-32")
+    p.add_argument("--range", help="запустить участок по кругу: 16-32 или 1:04-1:36")
     p = add("play", cmd_play, "воспроизведение; с участком — по кругу")
     p.add_argument("--region")
     p.add_argument("--range")
@@ -903,12 +991,12 @@ def main(argv=None) -> int:
     p = add("analyze", cmd_analyze, "рендер микса и стемов + метрики: громкость, пики, спектр, стерео, конфликты")
     p.add_argument("--tracks", help="номера и имена через запятую или all; по умолчанию треки верхнего уровня")
     p.add_argument("--region", help="имя или номер региона")
-    p.add_argument("--range", help="участок в секундах: 16-32")
+    p.add_argument("--range", help="участок: 16-32 (секунды) или 1:04-1:36")
     p.add_argument("--fresh", action="store_true", help="не брать отчёт из кэша")
     p = add("ride", cmd_ride, "выровнять громкость трека огибающей по его же кривой громкости")
     p.add_argument("track", help="номер или имя трека")
     p.add_argument("--region", help="имя или номер региона")
-    p.add_argument("--range", help="участок в секундах: 16-32")
+    p.add_argument("--range", help="участок: 16-32 (секунды) или 1:04-1:36")
     p.add_argument("--max", type=float, default=4.0, help="предел поправки, дБ (по умолчанию 4)")
     p.add_argument("--smooth", type=float, default=0.6, help="сглаживание, с (по умолчанию 0,6)")
     p.add_argument("--no-verify", action="store_true", help="не рендерить повторно для проверки")
@@ -917,15 +1005,15 @@ def main(argv=None) -> int:
     p = add("phase", cmd_phase, "фаза между дорожками одного источника")
     p.add_argument("tracks", nargs="+", help="две или больше дорожек: номера или имена")
     p.add_argument("--region", help="имя или номер региона")
-    p.add_argument("--range", help="участок в секундах: 16-32")
+    p.add_argument("--range", help="участок: 16-32 (секунды) или 1:04-1:36")
     p = add("gain", cmd_gain, "уровень трека на входе цепочки и после каждого плагина")
     p.add_argument("track", help="номер или имя трека")
     p.add_argument("--region", help="имя или номер региона")
-    p.add_argument("--range", help="участок в секундах: 16-32")
+    p.add_argument("--range", help="участок: 16-32 (секунды) или 1:04-1:36")
     p = add("trim", cmd_trim, "трим первым плагином: привести источник к рабочему уровню плагинов")
     p.add_argument("tracks", nargs="*", help="номера или имена; без них — все дорожки со звуком, кроме папок")
     p.add_argument("--region", help="имя или номер региона")
-    p.add_argument("--range", help="участок в секундах: 16-32")
+    p.add_argument("--range", help="участок: 16-32 (секунды) или 1:04-1:36")
     p.add_argument("--target", type=float, default=-18.0, help="средний уровень, dBFS (по умолчанию −18)")
     p.add_argument("--peak", type=float, default=-6.0, help="предел пиков, dBFS (по умолчанию −6)")
     p.add_argument("--with-fx", action="store_true", help="ставить и там, где после трима уже стоят плагины")
@@ -933,12 +1021,15 @@ def main(argv=None) -> int:
     p = add("groove", cmd_groove, "грув: попадание атак дорожек в сетку проекта или в удары опорной дорожки, мс")
     p.add_argument("tracks", nargs="*", help="номера или имена; без них — все дорожки со звуком, кроме папок")
     p.add_argument("--region", help="имя или номер региона")
-    p.add_argument("--range", help="участок в секундах: 16-32")
+    p.add_argument("--range", help="участок: 16-32 (секунды) или 1:04-1:36")
     p.add_argument("--grid", choices=["4", "8", "16", "32", "8t", "16t"], default="16", help="шаг сетки: 16 — шестнадцатые (по умолчанию), 8t — триольные восьмые")
     p.add_argument("--anchor", help="мерить относительно ударов этой дорожки, а не сетки (запись без клика)")
     p.add_argument("--floor", type=float, default=15.0, help="не считать удары тише сильных на столько дБ (по умолчанию 15)")
-    p = add("reference", cmd_reference, "сравнить последний анализ микса с референсным файлом")
+    p = add("reference", cmd_reference, "сравнить анализ микса с референсным файлом: целиком или часть с частью")
     p.add_argument("file", nargs="?", help="путь или имя файла из references/; без него — единственный файл в references/")
+    p.add_argument("--region", help="взять анализ этого региона микса, а не последний")
+    p.add_argument("--range", help="взять анализ этого участка микса: 16-32 или 1:04-1:36")
+    p.add_argument("--ref-range", help="участок референса: 62-93 или 1:02-1:33; без него — весь файл")
     p.add_argument("--fresh", action="store_true", help="пересчитать референс заново")
     p = add("plugins", cmd_plugins, "каталог установленных плагинов")
     p.add_argument("action", choices=["scan", "find"])

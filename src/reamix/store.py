@@ -1,8 +1,10 @@
-"""Снимки состояния в папке трека: .reamix/chunks (состояния треков по хешу) и
-.reamix/snapshots (что входило в снимок). Одинаковые состояния хранятся один раз."""
+"""Снимки состояния в папке трека: .reamix/chunks (состояния треков по хешу, рядом —
+значения параметров плагинов) и .reamix/snapshots (что входило в снимок). Одинаковые
+состояния хранятся один раз."""
 
 import hashlib
 import json
+import math
 import shutil
 import time
 from pathlib import Path
@@ -32,6 +34,9 @@ def ingest(result: dict, data: Path, kind: str, label: str) -> dict:
             file.unlink()
         else:
             file.rename(target)
+        params = file.with_suffix(".params")
+        if params.exists() and not target.with_suffix(".params").exists():
+            params.rename(target.with_suffix(".params"))
         tracks.append({"n": t["n"], "guid": t["guid"], "name": t["name"], "sha": sha, "bytes": t["bytes"]})
     out = data / "snapshots"
     out.mkdir(exist_ok=True)
@@ -152,8 +157,43 @@ def _track_changes(old: dict, new: dict) -> list[str]:
     return out
 
 
-def diff(old: dict, new: dict) -> list[str]:
-    """Что изменилось между двумя снимками, по строке на трек."""
+def _params(data: Path, sha: str) -> dict[str, list[float | None]]:
+    """Значения параметров плагинов трека в этом состоянии: GUID плагина → числа в родных
+    единицах параметра; None — параметр под автоматизацией."""
+    path = data / "chunks" / f"{sha}.params"
+    if not path.is_file():
+        return {}
+    rows = (line.split("\t") for line in path.read_text().splitlines())
+    return {row[0]: [None if v == "~" else float(v) for v in row[1].split()] for row in rows if len(row) == 2}
+
+
+def param_moves(data: Path, old: dict, new: dict) -> dict[str, dict[str, list[tuple[int, float, float]]]]:
+    """Параметры плагинов, сдвинувшиеся между снимками: трек → плагин → (номер, было, стало).
+    Параметры под автоматизацией не считаются: их двигает огибающая."""
+    was = {t["guid"]: t["sha"] for t in old["tracks"]}
+    moves = {}
+    for t in new["tracks"]:
+        sha = was.get(t["guid"])
+        if sha is None or sha == t["sha"]:
+            continue
+        before, after = _params(data, sha), _params(data, t["sha"])
+        per_fx = {}
+        for fx, now in after.items():
+            moved = [
+                (p, a, b) for p, (a, b) in enumerate(zip(before.get(fx, []), now))
+                if a is not None and b is not None and math.isfinite(a) and math.isfinite(b)
+                and abs(a - b) > 1e-6 * max(1.0, abs(a), abs(b))
+            ]
+            if moved:
+                per_fx[fx] = moved
+        if per_fx:
+            moves[t["guid"]] = per_fx
+    return moves
+
+
+def diff(old: dict, new: dict, params: dict[str, list[str]] | None = None) -> list[str]:
+    """Что изменилось между двумя снимками, по строке на трек. params — готовые строки о
+    сдвинувшихся параметрах плагинов по GUID трека (их имена знает только REAPER)."""
     lines = []
     op, np_ = old["skeleton"]["project"], new["skeleton"]["project"]
     if op["bpm"] != np_["bpm"]:
@@ -173,9 +213,9 @@ def diff(old: dict, new: dict) -> list[str]:
             lines.append(f"+трек {title}")
             continue
         was, was_sha = old_tracks[guid]
-        changes = _track_changes(was, t)
+        changes = _track_changes(was, t) + (params or {}).get(guid, [])
         if not changes and sha != was_sha:
-            changes = ["внутреннее состояние (параметры плагинов, огибающие или айтемы)"]
+            changes = ["внутреннее состояние (огибающие, айтемы или состояние плагина мимо параметров)"]
         if changes:
             lines.append(f"{title}: " + "; ".join(changes))
     for guid, (t, _) in old_tracks.items():

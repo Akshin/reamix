@@ -398,19 +398,21 @@ function rx.fx_defaults(track, fxref)
 end
 
 -- Число из текста, которым плагин показывает значение: «1.2 kHz» → 1200,
--- «30 ms» → 0.03, «-inf dB» → -inf. Не число («Off») → nil.
+-- «30 ms» → 0.03, «-inf dB» → -inf. Не число («Off») → nil. Второе значение — единица.
 local function parse_number(text)
-  if type(text) == 'number' then return text end
+  if type(text) == 'number' then return text, '' end
   local s = text:lower()
-  if s:match('^%s*%-%s*inf') then return -math.huge end
-  if s:match('^%s*%+?%s*inf') then return math.huge end
+  if s:match('^%s*%-%s*inf') then return -math.huge, '' end
+  if s:match('^%s*%+?%s*inf') then return math.huge, '' end
   local num, unit = s:match('^%s*([%-+]?%d*%.?%d+)%s*([%a%%]*)')
   local n = tonumber(num)
   if not n then return nil end
-  if unit == 'ms' then return n / 1000 end
-  if unit:sub(1, 1) == 'k' then return n * 1000 end
-  return n
+  if unit == 'ms' then return n / 1000, unit end
+  if unit:sub(1, 1) == 'k' then return n * 1000, unit end
+  return n, unit
 end
+
+local SECONDS = { s = true, sec = true, secs = true, seconds = true }
 
 -- Как плагин покажет значение x (0..1). Спрашиваем, не трогая параметр; если плагин
 -- так не умеет — ставим и читаем (тогда вызывающий возвращает параметр на место).
@@ -446,24 +448,65 @@ end
 -- Общий способ для чужих плагинов: шкалу параметра знает только сам плагин.
 local function seek(tr, fx, p, target)
   local before = r.TrackFX_GetParamNormalized(tr, fx, p)
-  local function at(x) return parse_number(text_at(tr, fx, p, x)) end
-  local want = parse_number(target) or fail('цель не число: ' .. tostring(target))
-  local v_lo, v_hi = at(0), at(1)
-  if not v_lo or not v_hi then
+  local function at(x) return (parse_number(text_at(tr, fx, p, x))) end
+  local function give_up(msg)
     r.TrackFX_SetParamNormalized(tr, fx, p, before)
-    fail('значение параметра «' .. param_name(tr, fx, p) .. '» не читается как число — ставь через text')
+    fail(msg)
+  end
+  local want, unit = parse_number(target)
+  if not want then fail('цель не число: ' .. tostring(target)) end
+  local t_lo, t_hi = text_at(tr, fx, p, 0), text_at(tr, fx, p, 1)
+  local v_lo, u_lo = parse_number(t_lo)
+  local v_hi, u_hi = parse_number(t_hi)
+  local name = param_name(tr, fx, p)
+  if not v_lo or not v_hi then
+    give_up('значение параметра «' .. name .. '» не читается как число — ставь через text')
+  end
+  local scale = 'шкала параметра «' .. name .. '» — от «' .. t_lo .. '» до «' .. t_hi .. '»'
+  -- Цель без единицы на шкале в миллисекундах — миллисекунды: 12 значит 12 мс, а не 12 с.
+  -- Шкала, где миллисекунды переходят в секунды, двусмысленна: единицу называет вызывающий.
+  if unit == '' and (u_lo == 'ms' or u_hi == 'ms') then
+    if SECONDS[u_lo] or SECONDS[u_hi] then
+      give_up('цель ' .. tostring(target) .. ' без единицы, а ' .. scale .. ': укажи её — {fmt = "12 ms"} или {fmt = "1.5 s"}')
+    end
+    want = want / 1000
+  end
+  -- Цель за краем шкалы — почти всегда не та единица. Молча встать на край нельзя:
+  -- так ревер получает предзадержку 500 мс вместо 12.
+  local low, high = math.min(v_lo, v_hi), math.max(v_lo, v_hi)
+  local span = high - low
+  local slack = (span == math.huge or span ~= span) and 0 or span * 0.01
+  if want < low - slack or want > high + slack then
+    give_up('цель ' .. tostring(target) .. ' вне шкалы: ' .. scale .. ' — проверь единицу')
+  end
+  if v_lo == want or v_hi == want then
+    set_norm(tr, fx, p, v_lo == want and 0 or 1)
+    return
   end
   local rising = v_hi >= v_lo
-  local lo, hi = 0, 1
-  for _ = 1, 40 do
-    local mid = (lo + hi) / 2
-    local v = at(mid)
-    if not v then break end
-    if (v < want) == rising then lo = mid else hi = mid end
+  -- Место на шкале, где показание перестаёт быть «до цели»: слева before_target(v) истинно.
+  local function flip(before_target)
+    local lo, hi = 0, 1
+    for _ = 1, 40 do
+      local mid = (lo + hi) / 2
+      local v = at(mid)
+      if not v then break end
+      if before_target(v) then lo = mid else hi = mid end
+    end
+    return lo, hi
   end
+  local lo, first = flip(function(v) if rising then return v < want end return v > want end)
+  if at(first) == want then
+    -- Показание округлено: цель показывает целый отрезок шкалы. Его середина — значение,
+    -- которое плагин и покажет, и применит; край отрезка отличался бы на полшага округления.
+    local last = flip(function(v) if rising then return v <= want end return v >= want end)
+    set_norm(tr, fx, p, (first + math.max(first, last)) / 2)
+    return
+  end
+  -- Ровно такого показания нет (ступенчатый параметр): ближайшее из соседних.
   local e_lo = math.abs((at(lo) or math.huge) - want)
-  local e_hi = math.abs((at(hi) or math.huge) - want)
-  set_norm(tr, fx, p, e_lo <= e_hi and lo or hi)
+  local e_hi = math.abs((at(first) or math.huge) - want)
+  set_norm(tr, fx, p, e_lo <= e_hi and lo or first)
 end
 
 -- Варианты параметра-переключателя: проходит весь диапазон и собирает разные показания.
@@ -882,6 +925,8 @@ end
 -- и фейдера; с opts.prefader — до фейдера и панорамы); opts.mix — ещё и общий микс;
 -- opts.range = {t0, t1} — участок, иначе весь проект.
 -- Настройки рендера проекта и выделение треков возвращаются как были.
+-- Solo — состояние прослушивания, а не микса: с ним «микс» вышел бы из одних солированных
+-- дорожек, а стемы остальных — пустыми. На время рендера оно снимается.
 function rx.render(opts)
   local saved_num, saved_str, selected = {}, {}, {}
   for _, k in ipairs(RENDER_NUM) do saved_num[k] = r.GetSetProjectInfo(0, k, 0, false) end
@@ -890,6 +935,16 @@ function rx.render(opts)
     saved_str[k] = v
   end
   for i = 0, r.CountSelectedTracks(0) - 1 do selected[#selected + 1] = r.GetSelectedTrack(0, i) end
+  local soloed, unsoloed = {}, A {}
+  for i = 0, r.CountTracks(0) - 1 do
+    local tr = r.GetTrack(0, i)
+    local mode = r.GetMediaTrackInfo_Value(tr, 'I_SOLO')
+    if mode ~= 0 then
+      soloed[#soloed + 1] = { tr = tr, mode = mode }
+      unsoloed[#unsoloed + 1] = (i + 1) .. ' ' .. track_name(tr)
+      r.SetMediaTrackInfo_Value(tr, 'I_SOLO', 0)
+    end
+  end
 
   local function num(k, v) r.GetSetProjectInfo(0, k, v, true) end
   local function str(k, v) r.GetSetProjectInfo_String(0, k, v, true) end
@@ -943,9 +998,13 @@ function rx.render(opts)
   for i = 0, r.CountTracks(0) - 1 do r.SetTrackSelected(r.GetTrack(0, i), false) end
   r.SetTrackSelected(r.GetMasterTrack(0), false)
   for _, tr in ipairs(selected) do r.SetTrackSelected(tr, true) end
+  for _, s in ipairs(soloed) do r.SetMediaTrackInfo_Value(s.tr, 'I_SOLO', s.mode) end
   if media_dir and not had_media_dir then os.remove(media_dir) end
   if not ok then error(err, 0) end
-  return { dir = opts.dir, files = files, offline = offline_sources(), rev = r.GetProjectStateChangeCount(0) }
+  return {
+    dir = opts.dir, files = files, offline = offline_sources(), unsoloed = unsoloed,
+    rev = r.GetProjectStateChangeCount(0),
+  }
 end
 
 -- ── Гейн-стейджинг ────────────────────────────────────────────────────────
@@ -1033,6 +1092,33 @@ local function write_file(path, text)
   f:close()
 end
 
+-- У инструментов бывают десятки тысяч параметров; для списка изменений хватит первых.
+local PARAMS_KEPT = 2048
+
+-- Значения параметров плагинов трека: строка на плагин — GUID и числа в родных единицах
+-- параметра. По ним список изменений называет, какую ручку повернули: в чанке состояние
+-- плагина непрозрачно. Нормализованное значение не годится: у AU шкала параметра зависит
+-- от частоты дискретизации, и то же значение читается по-разному. Параметр под активной
+-- огибающей пишется как «~»: им управляет автоматизация, а не ручка.
+local function params_text(tr)
+  local automated = {}
+  for i = 0, r.CountTrackEnvelopes(tr) - 1 do
+    local env = r.GetTrackEnvelope(tr, i)
+    local _, fx, p = r.Envelope_GetParentTrack(env)
+    local _, active = r.GetSetEnvelopeInfo_String(env, 'ACTIVE', '', false)
+    if fx and fx >= 0 and active == '1' then automated[fx .. ':' .. p] = true end
+  end
+  local lines = {}
+  for fx = 0, r.TrackFX_GetCount(tr) - 1 do
+    local values = {}
+    for p = 0, math.min(r.TrackFX_GetNumParams(tr, fx), PARAMS_KEPT) - 1 do
+      values[#values + 1] = automated[fx .. ':' .. p] and '~' or string.format('%.9g', (r.TrackFX_GetParam(tr, fx, p)))
+    end
+    lines[#lines + 1] = r.TrackFX_GetFXGUID(tr, fx) .. '\t' .. table.concat(values, ' ')
+  end
+  return table.concat(lines, '\n')
+end
+
 -- Полное состояние каждого трека родными чанками REAPER плюс скелет — в папку dir.
 function rx.snapshot(dir)
   r.RecursiveCreateDirectory(dir, 0)
@@ -1043,12 +1129,52 @@ function rx.snapshot(dir)
     if not ok then fail('не читается состояние трека №' .. n) end
     local file = string.format('%03d.rtrack', n)
     write_file(dir .. '/' .. file, chunk)
+    local params = params_text(tr)
+    if params ~= '' then write_file(dir .. '/' .. string.format('%03d.params', n), params) end
     index[#index + 1] = { n = n, guid = r.GetTrackGUID(tr), name = track_name(tr), file = file, bytes = #chunk }
   end
   dump(r.GetMasterTrack(0))
   for i = 0, r.CountTracks(0) - 1 do dump(r.GetTrack(0, i)) end
   write_file(dir .. '/skeleton.json', json.encode(rx.skeleton()))
   return { dir = dir, rev = r.GetProjectStateChangeCount(0), tracks = index }
+end
+
+local function track_by_guid(guid)
+  local master = r.GetMasterTrack(0)
+  if r.GetTrackGUID(master) == guid then return master end
+  for i = 0, r.CountTracks(0) - 1 do
+    local tr = r.GetTrack(0, i)
+    if r.GetTrackGUID(tr) == guid then return tr end
+  end
+end
+
+-- Для списка изменений: имена сдвинувшихся параметров и их показания — было и стало.
+-- list — { {track = guid, fx = guid, params = { {p, было, стало}, … }}, … }, значения в
+-- родных единицах; ответ в том же порядке. Показание берётся по значению, параметр при
+-- этом не трогается; плагин, который так не умеет, получает в ответ сами числа.
+function rx.params_describe(list)
+  local out = A {}
+  for _, item in ipairs(list) do
+    local entry = { params = A {} }
+    local tr = track_by_guid(item.track)
+    for fx = 0, (tr and r.TrackFX_GetCount(tr) or 0) - 1 do
+      if r.TrackFX_GetFXGUID(tr, fx) == item.fx then
+        local _, name = r.TrackFX_GetFXName(tr, fx, '')
+        entry.i, entry.name = fx + 1, name
+        for _, move in ipairs(item.params) do
+          local p = move[1]
+          local _, lo, hi = r.TrackFX_GetParam(tr, fx, p)
+          local function shown(raw)
+            local ok, text = r.TrackFX_FormatParamValueNormalized(tr, fx, p, hi > lo and (raw - lo) / (hi - lo) or raw, '')
+            return ok and text ~= '' and text or string.format('%.4g', raw)
+          end
+          entry.params[#entry.params + 1] = { name = param_name(tr, fx, p), was = shown(move[2]), now = shown(move[3]) }
+        end
+      end
+    end
+    out[#out + 1] = entry
+  end
+  return out
 end
 
 -- Возвращает треку состояние из файла чанка.

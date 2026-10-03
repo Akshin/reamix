@@ -108,6 +108,27 @@ def test_param_is_set_by_displayed_value(fake):
     assert side["fmt"] == "2.50 kHz"
     assert client.call('return rx.fx_set("Kick", 2, "Ratio", {fmt = "4"})')["fmt"] == "4.0:1"
     assert client.call('return rx.fx_set("Kick", 1, 1, 0.75)')["fmt"] == "12.0 dB"
+    # Показание округлено: подбор встаёт в настоящее значение, а не на край отрезка «6.0 dB».
+    assert client.call('return rx.fx_set("Kick", 1, 1, {fmt = 6})')["norm"] == pytest.approx(0.625, abs=1e-6)
+    assert client.call('return rx.fx_set("Kick", 1, 1, {fmt = 24})')["norm"] == 1
+
+
+def test_displayed_value_off_the_scale_fails_instead_of_landing_on_the_edge(fake):
+    client.call('rx.fx_add("Vocal Lead", "VST: ReaDelay (Cockos)")')
+    # Шкала в миллисекундах: число без единицы — миллисекунды, а не секунды.
+    assert client.call('return rx.fx_set("Vocal Lead", 1, "Predelay", {fmt = 12})')["fmt"] == "12.0 ms"
+    with pytest.raises(client.BridgeError, match="вне шкалы: шкала параметра «Predelay» — от «0.0 ms» до «500.0 ms»"):
+        client.call('return rx.fx_set("Vocal Lead", 1, "Predelay", {fmt = "2 s"})')
+    with pytest.raises(client.BridgeError, match="вне шкалы"):
+        client.call('return rx.fx_set("Kick", "ReaEQ", "Gain", {fmt = 30})')
+    assert client.call('return rx.fx_params("Vocal Lead", 1, "Predelay").params[1].fmt') == "12.0 ms"
+    assert client.call('return rx.fx_params("Kick", "ReaEQ", "Gain").params[1].fmt') == "0.0 dB"
+
+    # Миллисекунды переходят в секунды: без единицы цель двусмысленна.
+    with pytest.raises(client.BridgeError, match="без единицы"):
+        client.call('return rx.fx_set("Vocal Lead", 1, "Length", {fmt = 12})')
+    assert client.call('return rx.fx_set("Vocal Lead", 1, "Length", {fmt = "12 ms"})')["fmt"] == "12.0 ms"
+    assert client.call('return rx.fx_set("Vocal Lead", 1, "Length", {fmt = "1.5 s"})')["fmt"] == "1.50 s"
 
 
 def test_text_param_cannot_be_sought_and_stays_put(fake):
@@ -180,10 +201,11 @@ def test_do_snapshots_and_reports_changes(fake, capsys, tmp_path):
 
     # Состояние не менялось — снимок «до» второй правки не снимается заново.
     assert cli.main(["do", "параметр", 'rx.fx_set("Kick", 1, 0, 0.25)']) == 0
-    assert "2 Kick: внутреннее состояние" in capsys.readouterr().out
+    assert capsys.readouterr().out.splitlines()[-1] == "  2 Kick: fx 1 ReaEQ: Freq-Band 1 632.5 Hz → 112.5 Hz"
     assert [store.load(p)["kind"] for p in store.snapshots(data)] == ["before", "after", "after"]
-    # Неизменившиеся треки хранятся один раз.
-    assert len(list((data / "chunks").iterdir())) == 5 + 2 + 1
+    # Неизменившиеся треки хранятся один раз; у состояний с плагинами рядом лежат значения параметров.
+    assert len(list((data / "chunks").glob("*.rtrack"))) == 5 + 2 + 1
+    assert len(list((data / "chunks").glob("*.params"))) == 3 + 1
 
 
 def test_changes_since_last_snapshot(fake, capsys):
@@ -193,6 +215,25 @@ def test_changes_since_last_snapshot(fake, capsys):
     client.call('rx.track_set("Vocal Lead", {pan = 0.3})')
     assert cli.main(["changes"]) == 0
     assert capsys.readouterr().out.splitlines()[-1] == "  3 Vocal Lead: pan C → R30"
+
+
+def test_changes_name_the_knobs_turned_by_hand(fake, capsys):
+    assert cli.main(["snapshot", "старт"]) == 0
+    # Человек подкрутил плагины сам, мимо reamix do.
+    client.call('rx.fx_set("Kick", "Pro-C", "Ratio", {fmt = 8}) rx.fx_set("Kick", "Pro-C", "Style", {text = "Vocal"}) rx.fx_set("Kick", "ReaEQ", "Gain", {fmt = 6})')
+    assert cli.main(["changes"]) == 0
+    assert capsys.readouterr().out.splitlines()[-1] == (
+        "  2 Kick: fx 1 ReaEQ: Gain-Band 1 0.0 dB → 6.0 dB; fx 2 Pro-C 2: Ratio 4.8:1 → 8.0:1, Style Clean → Vocal"
+    )
+
+
+def test_changes_skip_automated_params(fake, lua, capsys):
+    # Gain-Band 1 под огибающей: его двигает автоматизация, а не ручка.
+    lua.execute('reaper._fake.tracks[2].envs = { { fx = 0, p = 1, name = "Gain-Band 1 / ReaEQ" } }')
+    assert cli.main(["snapshot"]) == 0
+    client.call('rx.fx_set("Kick", 1, "Gain", 0.9) rx.fx_set("Kick", 1, "Freq", 0.25)')
+    assert cli.main(["changes"]) == 0
+    assert capsys.readouterr().out.splitlines()[-1] == "  2 Kick: fx 1 ReaEQ: Freq-Band 1 632.5 Hz → 112.5 Hz"
 
 
 def test_undo_only_reverts_own_edits(fake, capsys, tmp_path):
@@ -265,6 +306,15 @@ def test_trim_goes_first_and_is_reused(fake):
     assert client.call('return rx.fx_params("Kick", 1).params[1].fmt') == "2.0"
 
 
+def test_render_ignores_solo_and_puts_it_back(fake, tmp_path):
+    client.call('rx.track_set("Kick", {solo = true})')
+    res = client.call(f'return rx.render({{dir = "{tmp_path}/out", mix = true, tracks = {{3}}}})')
+    assert res["unsoloed"] == ["2 Kick"]
+    # Оба прохода — микс и стемы — шли без solo, после рендера оно на месте.
+    assert list(fake.renders.values()) == ["", ""]
+    assert client.call('return rx.track_info("Kick").solo') is True
+
+
 def test_grid_follows_measures(fake):
     # Подделка: 120 уд/мин, 4/4. Шестнадцатые (0,25 четверти) с середины первого такта.
     grid = client.call("return rx.grid(1.0, 2.5, 0.25)")
@@ -303,6 +353,67 @@ def test_unanswered_request_is_withdrawn(tmp_path, monkeypatch):
     with pytest.raises(client.BridgeError, match="последний сигнал 60 с назад"):
         client.request("return 1", timeout=0.2)
     assert not (ipc / "request.lua").exists()
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="нужен ffmpeg")
+def test_reference_compares_part_with_part(fake, capsys, tmp_path):
+    import numpy as np
+    import soundfile as sf
+
+    from reamix import analysis
+
+    sr = 48000
+    t = np.arange(6 * sr) / sr
+    low, high = 0.2 * np.sin(2 * np.pi * 100 * t), 0.2 * np.sin(2 * np.pi * 5000 * t)
+    song = tmp_path / "song"
+    (song / "references").mkdir()
+    # Референс: шесть секунд низа, потом шесть секунд верха.
+    sf.write(song / "references" / "ref.wav", np.column_stack([np.concatenate([low, high])] * 2), sr, subtype="FLOAT")
+    mix, _ = analysis.measure(analysis.Audio(np.column_stack([high, high]), sr), [])
+    for run, span in (("a", [30.0, 36.0]), ("b", [0.0, 3.0])):
+        out = song / ".reamix" / "analysis" / run
+        out.mkdir(parents=True)
+        (out / "report.json").write_text(json.dumps({"id": run, "range": span, "files": {"mix": mix}}))
+
+    assert cli.main(["reference", "--range", "30-36", "--ref-range", "0:06-0:12"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "анализ a · 0:30.0–0:36.0 против ref.wav (0:06.0–0:12.0)"
+    # Полоса 4–8 кГц, где и звучит верх, совпала; остальные полосы пусты у обоих.
+    assert len(lines) == 5 and lines[-1].split("|")[7].strip() in ("+0", "-0")
+
+    # Без участков — последний анализ против всего файла; о разнице длин сказано.
+    assert cli.main(["reference"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "анализ b · 0:00.0–0:03.0 против ref.wav (целиком, 0:12.0)"
+    assert lines[-1].startswith("длины различаются (0:03.0 и 0:12.0)")
+
+    assert cli.main(["reference", "--range", "40-50"]) == 1
+    assert "анализа участка 0:40.0–0:50.0 нет" in capsys.readouterr().err
+
+
+def test_span_reads_seconds_and_minutes():
+    assert cli.parse_span("16-32") == (16.0, 32.0)
+    assert cli.parse_span("1:04-1:36.5") == (64.0, 96.5)
+    for bad in ("32-16", "1:04", "вступление"):
+        with pytest.raises(client.BridgeError):
+            cli.parse_span(bad)
+
+
+def test_bus_gains_follow_folders_and_sends_to_the_master():
+    def track(n, depth=0, vol=1.0, main_send=True, sends=()):
+        return {"n": n, "depth": depth, "vol": vol, "main_send": main_send, "sends": list(sends)}
+
+    send = {"dest": 5, "vol": 0.5, "mute": False, "dst_chan": 0}
+    sidechain = {"dest": 1, "vol": 1.0, "mute": False, "dst_chan": 2}
+    sk = {"tracks": [
+        track(1, vol=0.5),                      # папка Drums на −6 дБ
+        track(2, 1, vol=2.0),                   # Kick: свой фейдер уже в стеме
+        track(3, 1, sends=[sidechain]),         # Snare: сайдчейн — не путь в микс
+        track(4, main_send=False, sends=[send]),  # Gtr уходит в шину посылом на −6 дБ
+        track(5, vol=0.25),                     # шина Gtr на −12 дБ
+    ]}
+    gains = cli.bus_gains(sk)
+    assert gains == {2: pytest.approx(-6.02, abs=0.01), 3: pytest.approx(-6.02, abs=0.01), 4: pytest.approx(-18.06, abs=0.01)}
 
 
 def test_gain_ladder_and_trim_table_name_what_to_fix():

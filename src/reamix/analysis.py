@@ -222,24 +222,26 @@ def clipping(audio: Audio, limit: int = 5) -> dict:
 # ── Конфликты между стемами ──────────────────────────────────────────────────
 
 
-def conflicts(series: dict[str, dict], skip: set[frozenset], limit: int = 8) -> list[dict]:
+def conflicts(series: dict[str, dict], skip: set[frozenset], offsets: dict[str, float] | None = None, limit: int = 8) -> list[dict]:
     """Где один стем накрыт другим: в полосах, важных для первого, второй звучит не тише.
 
     series — имя стема → ряды из measure; skip — пары, которые сравнивать не надо
-    (папка и её дорожки, посыл и его получатель). Результат направленный: victim накрыт masker.
+    (папка и её дорожки, посыл и его получатель); offsets — на сколько дБ стем меняется
+    по пути в микс (фейдеры шин после него). Результат направленный: victim накрыт masker.
     """
     edges = third_octave_edges()
     names = [n for n, s in series.items() if "thirds" in s]
+    offsets = offsets or {}
     found = []
     for victim in names:
-        lv = series[victim]["thirds"].astype(np.float64)
+        lv = series[victim]["thirds"].astype(np.float64) + offsets.get(victim, 0.0)
         mean_v = to_db((10 ** (lv / 10)).mean(axis=1))
         # Важные полосы — в пределах 12 дБ от самой громкой у этого стема.
         important = (mean_v > mean_v.max() - 12) & (mean_v > -60)
         for masker in names:
             if masker == victim or frozenset((victim, masker)) in skip:
                 continue
-            lm = series[masker]["thirds"].astype(np.float64)
+            lm = series[masker]["thirds"].astype(np.float64) + offsets.get(masker, 0.0)
             frames = min(lv.shape[1], lm.shape[1])
             a, b = lv[:, :frames], lm[:, :frames]
             sounding = a > np.maximum(mean_v[:, None] - 10, -70)
@@ -467,8 +469,12 @@ def compare(mix: dict, ref: dict, ref_name: str) -> str:
 # ── Отчёт ────────────────────────────────────────────────────────────────────
 
 
-def analyze(files: dict[str, Path], regions: list[dict], skip: set[frozenset], out: Path, meta: dict) -> dict:
-    """Измеряет все рендеры, ищет конфликты, пишет report.json и series.npz в out."""
+def analyze(
+    files: dict[str, Path], regions: list[dict], skip: set[frozenset], out: Path, meta: dict,
+    offsets: dict[str, float] | None = None,
+) -> dict:
+    """Измеряет все рендеры, ищет конфликты, пишет report.json и series.npz в out.
+    offsets — поправки уровня стемов для поиска конфликтов (см. conflicts)."""
     out.mkdir(parents=True, exist_ok=True)
     report = {**meta, "files": {}, "band_labels": BAND_LABELS}
     all_series, arrays = {}, {}
@@ -483,7 +489,7 @@ def analyze(files: dict[str, Path], regions: list[dict], skip: set[frozenset], o
             all_series[name] = series
         for key, value in series.items():
             arrays[f"{name}/{key}"] = value
-    report["conflicts"] = conflicts(all_series, skip)
+    report["conflicts"] = conflicts(all_series, skip, offsets)
     report["warnings"] = warnings(report)
     np.savez_compressed(out / "series.npz", third_centers=THIRD_CENTERS, hop_sec=HOP_SEC, **arrays)
     (out / "report.json").write_text(json.dumps(report, ensure_ascii=False))

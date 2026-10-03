@@ -2,7 +2,7 @@
 -- Моделирует ровно то, что используют bridge/*.lua: треки, плагины с параметрами,
 -- историю undo, ExtState и defer. Реальное поведение API проверяется только вживую.
 
-local F = { rev = 100, ext = {}, undo = {}, redo = {}, renders = {}, path = '/music/song/main.rpp' }
+local F = { rev = 100, ext = {}, undo = {}, redo = {}, renders = {}, audio = 1, audio_log = {}, path = '/music/song/main.rpp' }
 
 local function hz(norm) return string.format('%.1f Hz', 20 * 1000 ^ norm) end
 local function khz(norm)
@@ -58,16 +58,41 @@ local catalog = {
         if ms >= 1000 then return string.format('%.2f s', ms / 1000) end
         return string.format('%.1f ms', ms)
       end },
+      -- Ступени, как у Pultec: шкала целиком в килогерцах.
+      { name = 'High Freq', norm = 0, fmt = function(norm)
+        local steps = { 3, 4, 5, 8, 10, 12, 16 }
+        return steps[math.min(#steps, math.floor(norm * #steps) + 1)] .. ' KCS'
+      end },
     }
+  end,
+  -- Как Waves: новое значение показывает сразу, а в состояние (то, что попадёт в чанк
+  -- и в точку undo) переносит только в аудиопотоке.
+  ['VST3: RVox Stereo (Waves)'] = function()
+    return { { name = 'Compression', norm = 1, fmt = function(norm) return string.format('%.1f dB', norm * 36 - 36) end } }
+  end,
+  -- То же, но аудиопоток до плагина не доходит: состояние не обновляется никогда.
+  ['VST3: NLS Channel Stereo (Waves)'] = function()
+    return { { name = 'Drive', norm = 0.5, fmt = function(norm) return string.format('%.1f', norm * 10) end } }
   end,
   ['JS: utility/volume'] = function()
     return { { name = 'Adjustment (dB)', norm = 0, fmt = function(v) return string.format('%.1f', v) end } }
   end,
 }
 
+local function live_state(plugin)
+  local values = {}
+  for _, param in ipairs(plugin.params) do values[#values + 1] = string.format('%s %.17g', param.name, param.norm) end
+  return table.concat(values, ';')
+end
+
 local function installed(name)
   local full = name:gsub('^(%w+): ?', '%1: ')
-  return fx(full, catalog[full] and catalog[full]() or {})
+  local plugin = fx(full, catalog[full] and catalog[full]() or {})
+  if full:find('Waves') then
+    plugin.lazy, plugin.saved = true, live_state(plugin)
+    plugin.deaf = full:find('NLS') ~= nil
+  end
+  return plugin
 end
 
 F.master = track('MASTER')
@@ -179,9 +204,9 @@ function R.CountTrackMediaItems(tr) return tr.items and #tr.items or 0 end
 function R.GetTrackMediaItem(tr, i) return tr.items[i + 1] end
 function R.GetMediaItemInfo_Value(item, key) return item[key] end
 function R.TrackFX_GetRecCount() return 0 end
-function R.Audio_IsRunning() return 1 end
-function R.Audio_Init() end
-function R.Audio_Quit() end
+function R.Audio_IsRunning() return F.audio end
+function R.Audio_Init() F.audio = 1 F.audio_log[#F.audio_log + 1] = 'init' end
+function R.Audio_Quit() F.audio = 0 F.audio_log[#F.audio_log + 1] = 'quit' end
 
 function R.TrackFX_GetCount(tr) return #tr.fx end
 function R.TrackFX_GetFXName(tr, i) return true, tr.fx[i + 1].name end
@@ -201,8 +226,15 @@ end
 function R.TrackFX_FormatParamValueNormalized(tr, i, p, v)
   return true, tr.fx[i + 1].params[p + 1].fmt(v)
 end
-function R.TrackFX_SetParamNormalized(tr, i, p, v) tr.fx[i + 1].params[p + 1].norm = v touch() return true end
-function R.TrackFX_SetParam(tr, i, p, v) tr.fx[i + 1].params[p + 1].norm = v touch() return true end
+-- Проект меняется, когда меняется состояние плагина: у «ленивого» — не в момент записи.
+local function set_param(tr, i, p, v)
+  local plugin = tr.fx[i + 1]
+  plugin.params[p + 1].norm = v
+  if not plugin.lazy then touch() end
+  return true
+end
+function R.TrackFX_SetParamNormalized(tr, i, p, v) return set_param(tr, i, p, v) end
+function R.TrackFX_SetParam(tr, i, p, v) return set_param(tr, i, p, v) end
 -- instantiate: -1 — в конец цепочки, -1000 - i — на место i (с нуля).
 function R.TrackFX_AddByName(tr, name, _, instantiate)
   if name:find('Missing') then return -1 end
@@ -216,6 +248,14 @@ function R.TrackFX_GetNamedConfigParm(tr, i, key)
   if key == 'fx_name' then return true, plugin.name end
   if key == 'fx_ident' and plugin.name:find('^JS: ') then return true, (plugin.name:gsub('^JS: ', '')) end
   if key == 'fx_ident' then return true, '/Plug-Ins/' .. plugin.name:gsub('^%w+: ', '') .. '.vst<1' end
+  if key == 'vst_chunk' and plugin.lazy then
+    -- Пока аудио идёт, очередной его блок переносит параметры в состояние.
+    if F.audio == 1 and not plugin.deaf and plugin.saved ~= live_state(plugin) then
+      plugin.saved = live_state(plugin)
+      touch()
+    end
+    return true, plugin.saved
+  end
   return false, ''
 end
 function R.InsertTrackAtIndex(i) table.insert(F.tracks, i + 1, track('')) touch() end
@@ -230,7 +270,11 @@ function R.GetTrackStateChunk(tr)
   for _, key in ipairs({ 'D_VOL', 'D_PAN', 'B_MUTE' }) do lines[#lines + 1] = key .. ' ' .. tr.vals[key] end
   for _, plugin in ipairs(tr.fx) do
     lines[#lines + 1] = 'FX ' .. plugin.name .. ' ' .. tostring(plugin.enabled)
-    for _, param in ipairs(plugin.params) do lines[#lines + 1] = string.format('  %s %.17g', param.name, param.norm) end
+    if plugin.lazy then
+      lines[#lines + 1] = '  ' .. plugin.saved
+    else
+      for _, param in ipairs(plugin.params) do lines[#lines + 1] = string.format('  %s %.17g', param.name, param.norm) end
+    end
   end
   lines[#lines + 1] = '>'
   return true, table.concat(lines, '\n')

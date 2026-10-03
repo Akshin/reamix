@@ -74,6 +74,14 @@ def test_errors_are_reported(fake):
         client.call("return rx.track_info(99)")
 
 
+def test_status_tells_to_reload_an_old_bridge(fake, capsys, monkeypatch):
+    assert cli.main(["status"]) == 0
+    assert "старой версии" not in capsys.readouterr().out
+    monkeypatch.setattr(client, "BRIDGE_VERSION", 99)
+    assert cli.main(["status"]) == 0
+    assert capsys.readouterr().out.splitlines()[-1] == "запущен мост старой версии — reamix reload"
+
+
 def test_heartbeat_names_project(fake):
     beat = client.alive()
     assert beat["project"].endswith("main.rpp") and beat["age"] < 5
@@ -124,11 +132,38 @@ def test_displayed_value_off_the_scale_fails_instead_of_landing_on_the_edge(fake
     assert client.call('return rx.fx_params("Vocal Lead", 1, "Predelay").params[1].fmt') == "12.0 ms"
     assert client.call('return rx.fx_params("Kick", "ReaEQ", "Gain").params[1].fmt') == "0.0 dB"
 
-    # Миллисекунды переходят в секунды: без единицы цель двусмысленна.
+    # Миллисекунды переходят в секунды: число без единицы годится, пока прочтение одно.
+    assert client.call('return rx.fx_set("Vocal Lead", 1, "Length", {fmt = 12})')["fmt"] == "12.0 ms"
     with pytest.raises(client.BridgeError, match="без единицы"):
-        client.call('return rx.fx_set("Vocal Lead", 1, "Length", {fmt = 12})')
-    assert client.call('return rx.fx_set("Vocal Lead", 1, "Length", {fmt = "12 ms"})')["fmt"] == "12.0 ms"
+        client.call('return rx.fx_set("Vocal Lead", 1, "Length", {fmt = 1.5})')
     assert client.call('return rx.fx_set("Vocal Lead", 1, "Length", {fmt = "1.5 s"})')["fmt"] == "1.50 s"
+    # Шкала целиком в килогерцах: 8 — это 8 кГц, 5000 — 5000 Гц.
+    assert client.call('return rx.fx_set("Vocal Lead", 1, "High Freq", {fmt = 8})')["fmt"] == "8 KCS"
+    assert client.call('return rx.fx_set("Vocal Lead", 1, "High Freq", {fmt = 5000})')["fmt"] == "5 KCS"
+
+
+def test_param_reaches_plugin_state_before_the_undo_block_closes(fake, lua, capsys):
+    # Плагин показывает новое значение сразу, а в состояние переносит в аудиопотоке;
+    # REAPER в фоне держит аудиоустройство закрытым.
+    client.call('rx.fx_add("Vocal Lead", "VST3: RVox Stereo (Waves)")')
+    lua.execute("reaper._fake.audio = 0")
+    code = 'rx.fx_set("Vocal Lead", 1, "Compression", 0.5) rx.fx_set("Vocal Lead", 1, "Compression", 0.25)'
+    assert cli.main(["do", "компрессия", code]) == 0
+    out, err = capsys.readouterr()
+    assert out.splitlines()[-1] == "  3 Vocal Lead: fx 1 RVox Stereo: Compression 0.0 dB → -27.0 dB" and err == ""
+    assert client.call("return rx.history().undo") == "reamix: компрессия"
+    # Устройство открыто один раз на запрос и закрыто в его конце.
+    assert list(fake.audio_log.values()) == ["init", "quit"]
+
+
+def test_param_that_never_reaches_plugin_state_is_reported(fake, lua, capsys):
+    client.call('rx.fx_add("Vocal Lead", "VST3: NLS Channel Stereo (Waves)")')
+    code = 'rx.fx_set("Vocal Lead", 1, "Drive", 0.9) return rx.fx_set("Vocal Lead", 1, "Drive", {fmt = 7}).fmt'
+    assert cli.main(["do", "драйв", code]) == 0
+    out, err = capsys.readouterr()
+    assert out.splitlines()[0] == "7.0"
+    # Сказано один раз на плагин, а не на каждую запись.
+    assert err.count("в сохраняемое состояние плагина не попал") == 1 and "NLS Channel Stereo" in err and "«Drive»" in err
 
 
 def test_text_param_cannot_be_sought_and_stays_put(fake):
@@ -389,6 +424,12 @@ def test_reference_compares_part_with_part(fake, capsys, tmp_path):
 
     assert cli.main(["reference", "--range", "40-50"]) == 1
     assert "анализа участка 0:40.0–0:50.0 нет" in capsys.readouterr().err
+
+
+def test_fx_short_name_drops_format_and_vendor():
+    assert fmt.fx_short("VST3: Pro-Q 3 (FabFilter)") == "Pro-Q 3"
+    assert fmt.fx_short("VST3: UADx Neve 1073 Preamp and EQ (Universal Audio (UADx))") == "UADx Neve 1073 Preamp and EQ"
+    assert fmt.fx_short("AU: RVox (s) (Waves)") == "RVox (s)"
 
 
 def test_span_reads_seconds_and_minutes():

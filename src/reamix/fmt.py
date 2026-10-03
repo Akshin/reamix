@@ -7,7 +7,7 @@ import math
 import re
 
 _FX_PREFIX = re.compile(r"^(VST3?i?|AUi?|JS|CLAPi?|LV2i?|DX): ")
-_FX_VENDOR = re.compile(r" \([^()]*\)$")
+_FX_VENDOR = re.compile(r" \((?:[^()]|\([^()]*\))*\)$")  # и «(Universal Audio (UADx))»
 
 
 def db(gain: float) -> str:

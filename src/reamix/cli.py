@@ -73,6 +73,8 @@ def cmd_status(args):
     except client.BridgeError:
         state = f"не отвечает, последний сигнал {beat['age']:.0f} с назад"
     print(f"мост {state} · {beat['project'] or '(проект не сохранён)'} · rev {beat['rev']}")
+    if beat.get("version", 1) < client.BRIDGE_VERSION:
+        print("запущен мост старой версии — reamix reload")
 
 
 def cmd_reload(args):
@@ -130,6 +132,7 @@ def apply_edit(args, data: Path, label: str, code: str, snapshot: bool = True):
     """Правка одним undo-блоком со снимками до и после. Возвращает результат и список изменений."""
     snap = store.staging(data) if snapshot else None
     resp = client.request(code, undo=label, project=guard(args), snap=snap, timeout=args.timeout)
+    client.warn(resp)
     before = store.latest(data) if snap else None
     if resp.get("snap_before"):
         before = store.ingest(resp["snap_before"], data, "before", label)
@@ -932,6 +935,7 @@ def cmd_doctor(args):
             check(True, f"мост отвечает · REAPER {version} · {beat['project'] or 'проект не сохранён'}", "")
             major = int(re.match(r"\d+", version).group())
             check(major >= 7, "версия REAPER подходит", f"REAPER {version}: проверено только на 7 и новее")
+            check(beat.get("version", 1) >= client.BRIDGE_VERSION, "мост свежий", "запущен мост старой версии — reamix reload")
             if info.get("offline") == "1":
                 print("  инфо REAPER отключает медиа, когда неактивен — рендер сам включает их обратно")
         except client.BridgeError as e:

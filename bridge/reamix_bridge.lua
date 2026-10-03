@@ -2,7 +2,7 @@
 -- Крутится фоном (defer), ждёт файл .ipc/request.lua, выполняет его как Lua-код
 -- и пишет ответ в .ipc/response.json. Протокол — docs/architecture.md.
 
-local VERSION = 1
+local VERSION = 2
 
 local source = debug.getinfo(1, 'S').source:gsub('^@', '')
 local bridge_dir = source:match('^(.*)[/\\][^/\\]*$')
@@ -69,7 +69,7 @@ local function handle(text)
       if mismatch then error(mismatch, 0) end
     end
     -- lib.lua перечитывается на каждый запрос: правки в нём не требуют перезапуска моста.
-    local rx = assert(loadfile(bridge_dir .. '/lib.lua'))(json, root)
+    local rx = assert(loadfile(bridge_dir .. '/lib.lua'))(json, root, { releases = true })
     local env = setmetatable({ rx = rx, json = json, A = json.array }, { __index = _G })
     local chunk, syntax = load(text, '=request', 't', env)
     if not chunk then error(syntax, 0) end
@@ -91,6 +91,9 @@ local function handle(text)
       if type(e) == 'table' and e.reamix then return e.reamix end
       return debug.traceback(tostring(e), 2)
     end)
+    -- Аудиоустройство, открытое ради записи параметров, закрывается до конца undo-блока.
+    rx.release()
+    if #rx.warnings > 0 then resp.warnings = rx.warnings end
     if undo then
       reaper.PreventUIRefresh(-1)
       reaper.Undo_EndBlock2(0, label, -1)

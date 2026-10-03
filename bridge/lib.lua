@@ -2,11 +2,15 @@
 -- Нумерация: треки и плагины с 1 (как в интерфейсе), 0 или 'master' — мастер;
 -- параметры плагинов с 0 (как в API REAPER).
 
-local json, root = ...
+local json, root, host = ...
 local r = reaper
 local A = json.array
 
 local rx = {}
+
+-- Что запрос должен сказать вызывающему, кроме результата: мост кладёт это в ответ.
+rx.warnings = A {}
+local function warn(msg) rx.warnings[#rx.warnings + 1] = msg end
 
 -- Ожидаемая ошибка (не найден трек, плагин не добавился): мост покажет её без трассировки.
 local Failure = { __tostring = function(e) return e.reamix end }
@@ -397,6 +401,13 @@ function rx.fx_defaults(track, fxref)
   return { ident = ident, name = name, norms = norms }
 end
 
+-- Во сколько раз единица показания крупнее основной: «ms» — 1/1000, «kHz», «KCS» — 1000.
+local function unit_factor(unit)
+  if unit == 'ms' then return 1 / 1000 end
+  if unit:sub(1, 1) == 'k' then return 1000 end
+  return 1
+end
+
 -- Число из текста, которым плагин показывает значение: «1.2 kHz» → 1200,
 -- «30 ms» → 0.03, «-inf dB» → -inf. Не число («Off») → nil. Второе значение — единица.
 local function parse_number(text)
@@ -407,12 +418,8 @@ local function parse_number(text)
   local num, unit = s:match('^%s*([%-+]?%d*%.?%d+)%s*([%a%%]*)')
   local n = tonumber(num)
   if not n then return nil end
-  if unit == 'ms' then return n / 1000, unit end
-  if unit:sub(1, 1) == 'k' then return n * 1000, unit end
-  return n, unit
+  return n * unit_factor(unit), unit
 end
-
-local SECONDS = { s = true, sec = true, secs = true, seconds = true }
 
 -- Как плагин покажет значение x (0..1). Спрашиваем, не трогая параметр; если плагин
 -- так не умеет — ставим и читаем (тогда вызывающий возвращает параметр на место).
@@ -423,10 +430,67 @@ local function text_at(tr, fx, p, x)
   return param_fmt(tr, fx, p)
 end
 
--- Ставит значение и убеждается, что плагин его принял. CLAP-плагины применяют
--- изменения в аудиопотоке: с задержкой, а при закрытом аудиоустройстве — никогда.
+-- Плагины применяют записанное в аудиопотоке, а REAPER в фоне держит аудиоустройство
+-- закрытым: тогда оно открывается. Новый мост закрывает его в конце запроса (rx.release),
+-- при старом — сразу после записи.
+local audio_opened = false
+
+local function open_audio()
+  if r.Audio_IsRunning() ~= 0 then return false end
+  r.Audio_Init()
+  audio_opened = true
+  return true
+end
+
+function rx.release()
+  if audio_opened then r.Audio_Quit() end
+  audio_opened = false
+end
+
+-- Состояние плагина, каким его сохранят проект и точка undo. У AU отдельно оно не
+-- отдаётся — берётся чанк всего трека. nil — ждать нечего: у JS состояние и есть значения
+-- параметров.
+local function fx_state(tr, fx)
+  for _, key in ipairs({ 'vst_chunk', 'clap_chunk' }) do
+    local ok, chunk = r.TrackFX_GetNamedConfigParm(tr, fx, key)
+    if ok and chunk ~= '' then return chunk end
+  end
+  local _, kind = r.TrackFX_GetNamedConfigParm(tr, fx, 'fx_type')
+  if kind:find('^AU') then
+    local _, chunk = r.GetTrackStateChunk(tr, '', false)
+    return chunk
+  end
+end
+
+local SETTLE = 0.25  -- с: блок аудио — до 85 мс при буфере 4096
+local stuck = {}     -- плагины, чьё состояние за параметром не пошло: второй раз не ждём
+
+-- Ждёт, пока записанный параметр дойдёт до состояния плагина; state — оно же до записи.
+-- Waves (VST3) показывает новое значение сразу, а в состояние переносит со следующим
+-- блоком аудио. Без ожидания undo-блок закрывается со старым состоянием: точки отката
+-- нет, снимок «после» пуст, а изменение приклеивается к следующей правке.
+local function settle(tr, fx, p, state)
+  if state == nil or fx_state(tr, fx) ~= state then return end
+  local guid = r.TrackFX_GetFXGUID(tr, fx)
+  if stuck[guid] then return end
+  open_audio()
+  local deadline = r.time_precise() + SETTLE
+  repeat until fx_state(tr, fx) ~= state or r.time_precise() > deadline
+  if fx_state(tr, fx) == state then
+    stuck[guid] = true
+    local _, name = r.TrackFX_GetFXName(tr, fx, '')
+    warn('«' .. name .. '»: параметр «' .. param_name(tr, fx, p) .. '» записан, но в сохраняемое состояние плагина '
+      .. 'не попал (общий для экземпляров или несохраняемый?) — откат, снимки и сохранённый проект '
+      .. 'могут его не увидеть; подействовал ли он на звук, проверь рендером')
+  end
+end
+
+-- Ставит значение и убеждается, что плагин его принял и донёс до своего состояния.
+-- CLAP-плагины применяют изменения в аудиопотоке: с задержкой, а при закрытом
+-- аудиоустройстве — никогда.
 local function set_norm(tr, fx, p, x)
   local before = r.TrackFX_GetParamNormalized(tr, fx, p)
+  local state = fx_state(tr, fx)
   r.TrackFX_SetParamNormalized(tr, fx, p, x)
   local function applied()
     if r.TrackFX_GetParamNormalized(tr, fx, p) ~= before then return true end
@@ -435,12 +499,13 @@ local function set_norm(tr, fx, p, x)
     local ok_b, b = r.TrackFX_FormatParamValueNormalized(tr, fx, p, before, '')
     return not ok_a or not ok_b or a == b
   end
-  if applied() then return end
-  local opened = r.Audio_IsRunning() == 0
-  if opened then r.Audio_Init() end
-  local deadline = r.time_precise() + 0.5
-  repeat r.TrackFX_SetParamNormalized(tr, fx, p, x) until applied() or r.time_precise() > deadline
-  if opened then r.Audio_Quit() end
+  if not applied() then
+    open_audio()
+    local deadline = r.time_precise() + 0.5
+    repeat r.TrackFX_SetParamNormalized(tr, fx, p, x) until applied() or r.time_precise() > deadline
+  end
+  if r.TrackFX_GetParamNormalized(tr, fx, p) ~= before then settle(tr, fx, p, state) end
+  if not (host and host.releases) then rx.release() end
   if not applied() then fail('плагин не принял значение параметра «' .. param_name(tr, fx, p) .. '»') end
 end
 
@@ -463,21 +528,32 @@ local function seek(tr, fx, p, target)
     give_up('значение параметра «' .. name .. '» не читается как число — ставь через text')
   end
   local scale = 'шкала параметра «' .. name .. '» — от «' .. t_lo .. '» до «' .. t_hi .. '»'
-  -- Цель без единицы на шкале в миллисекундах — миллисекунды: 12 значит 12 мс, а не 12 с.
-  -- Шкала, где миллисекунды переходят в секунды, двусмысленна: единицу называет вызывающий.
-  if unit == '' and (u_lo == 'ms' or u_hi == 'ms') then
-    if SECONDS[u_lo] or SECONDS[u_hi] then
-      give_up('цель ' .. tostring(target) .. ' без единицы, а ' .. scale .. ': укажи её — {fmt = "12 ms"} или {fmt = "1.5 s"}')
-    end
-    want = want / 1000
-  end
   -- Цель за краем шкалы — почти всегда не та единица. Молча встать на край нельзя:
   -- так ревер получает предзадержку 500 мс вместо 12.
   local low, high = math.min(v_lo, v_hi), math.max(v_lo, v_hi)
   local span = high - low
   local slack = (span == math.huge or span ~= span) and 0 or span * 0.01
-  if want < low - slack or want > high + slack then
-    give_up('цель ' .. tostring(target) .. ' вне шкалы: ' .. scale .. ' — проверь единицу')
+  local function on_scale(v) return v >= low - slack and v <= high + slack end
+  if unit ~= '' then
+    if not on_scale(want) then give_up('цель ' .. tostring(target) .. ' вне шкалы: ' .. scale .. ' — проверь единицу') end
+  else
+    -- Цель без единицы — число либо в единицах шкалы (12 на шкале в мс — 12 мс, 8 на шкале
+    -- «3 KCS … 16 KCS» — 8 кГц), либо в основных (5000 на шкале в kHz — 5000 Гц). Берётся
+    -- прочтение, которое лежит на шкале; подходят оба — единицу называет вызывающий.
+    local readings = {}
+    for _, factor in ipairs({ 1, unit_factor(u_lo), unit_factor(u_hi) }) do
+      local v = want * factor
+      if on_scale(v) and v ~= readings[1] and v ~= readings[2] then readings[#readings + 1] = v end
+    end
+    if #readings == 0 then
+      give_up('цель ' .. tostring(target) .. ' вне шкалы: ' .. scale .. ' — проверь единицу')
+    elseif #readings == 1 then
+      want = readings[1]
+    elseif u_lo == u_hi then
+      want = want * unit_factor(u_lo)
+    else
+      give_up('цель ' .. tostring(target) .. ' без единицы, а ' .. scale .. ': укажи её, как пишет плагин — {fmt = "12 ms"}, {fmt = "1.5 s"}')
+    end
   end
   if v_lo == want or v_hi == want then
     set_norm(tr, fx, p, v_lo == want and 0 or 1)
@@ -545,7 +621,11 @@ function rx.fx_set(track, fxref, pref, value)
   local tr, fx = rx.fx(track, fxref)
   local p = rx.param(tr, fx, pref)
   if type(value) == 'number' then set_norm(tr, fx, p, value)
-  elseif value.raw then r.TrackFX_SetParam(tr, fx, p, value.raw)
+  elseif value.raw then
+    local before, state = r.TrackFX_GetParam(tr, fx, p), fx_state(tr, fx)
+    r.TrackFX_SetParam(tr, fx, p, value.raw)
+    if r.TrackFX_GetParam(tr, fx, p) ~= before then settle(tr, fx, p, state) end
+    if not (host and host.releases) then rx.release() end
   elseif value.fmt then seek(tr, fx, p, value.fmt)
   elseif value.text then
     local options = scan_options(tr, fx, p)

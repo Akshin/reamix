@@ -3,6 +3,7 @@
 import fcntl
 import json
 import os
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -12,6 +13,9 @@ from . import paths
 
 class BridgeError(Exception):
     pass
+
+
+BRIDGE_VERSION = 2  # VERSION в bridge/reamix_bridge.lua: запущенный мост может быть старше кода
 
 
 def alive() -> dict | None:
@@ -83,9 +87,16 @@ def request(
     raise BridgeError(f"мост не отвечает ({ago}) — REAPER занят или закрыт")
 
 
+def warn(data: dict) -> None:
+    """Печатает то, что мост хотел сказать помимо результата."""
+    for text in data.get("warnings", []):
+        print(f"предупреждение: {text}", file=sys.stderr)
+
+
 def call(code: str, **kwargs):
     """Как request, но возвращает только результат и бросает ошибку моста."""
     data = request(code, **kwargs)
+    warn(data)
     if not data.get("ok"):
         note = " (правка откатана)" if data.get("rolled_back") else ""
         raise BridgeError(str(data.get("error")) + note)
